@@ -28,9 +28,11 @@ puts it in front of a user.**
 | `POST /api/analyze` - upload, validate, run, track | Working |
 | `GET /api/jobs/{id}` - status, stage, tile-based progress | Working |
 | `GET /api/results/{id}` and its CSV and GeoJSON downloads | Working |
-| Test suite (404 tests) | Passing |
-| Crown rendering and click-to-inspect in the map | **Not built yet** |
-| Frontend wired to the analysis endpoints | **Not built yet** |
+| Upload, settings, progress and results in the browser | Working |
+| Crown polygons on the map, crown IDs, click-to-inspect | Working |
+| CSV and GeoJSON download buttons | Working |
+| Test suite (413 tests) | Passing |
+| Deployment configuration for a hosted environment | **Not built yet** |
 
 The whole pipeline is reachable over HTTP:
 
@@ -59,14 +61,12 @@ result = analyze_image(
 print(result.summary.tree_count, result.summary.canopy_coverage_pct)
 ```
 
-Boundaries are end-to-end in the browser today: drop a KML, KMZ or GeoJSON and
-it is parsed server-side, drawn on the map, and reported with the area it
-encloses in square metres.
-
-The detection metrics are not yet wired to the new endpoints, so **Run analysis
-in the browser is still disabled and says why**. No part of the UI shows an
-invented tree count, area or coverage figure to fill that gap - those metrics
-read as an em dash until a real analysis produces them.
+It is also end to end in the browser: drop imagery and an optional boundary,
+adjust the settings, run the analysis, watch it progress, click a crown on the
+map to inspect it, and download the CSV or GeoJSON. Every figure on screen is
+read from the analysis response - there is no number in the interface that the
+backend did not compute from the uploaded file, and a metric the imagery cannot
+support reads as an em dash rather than a plausible zero.
 
 ---
 
@@ -83,9 +83,10 @@ read as an em dash until a real analysis produces them.
 
 - Runs the whole of that as a background job with real, pollable progress
 - Serves every figure above over HTTP, with CSV and GeoJSON downloads
+- Draws the crowns over a map, labels them, and reports one in detail when it
+  is clicked
 
-Still to come: the parts of the interface that depend on those endpoints -
-crown polygons on the map, click-to-inspect, download buttons.
+Still to come: deployment configuration for a hosted environment.
 
 ---
 
@@ -450,6 +451,40 @@ check whether a file carries usable georeferencing.
 
 ---
 
+## Using the interface
+
+`npm run dev` serves the app at <http://localhost:5173>, proxying `/api` to the
+backend so no CORS configuration is needed in development.
+
+1. **Drop imagery** - GeoTIFF, PNG or JPEG. The file is checked against the
+   server's own format list and size limit before anything is uploaded, and the
+   panel reports its name, size and type with a control to remove it.
+2. **Drop a boundary** (optional) - KML, KMZ or GeoJSON. It is parsed and
+   measured server-side the moment it lands and drawn on the map, so a file for
+   the wrong site is obvious immediately rather than after an analysis.
+3. **Adjust the settings** - confidence threshold, minimum crown area, and the
+   engine if the server offers more than one. The defaults come from
+   `/api/capabilities` rather than being hardcoded in the browser, and each
+   control explains what raising or lowering it costs.
+4. **Run the analysis.** The page stays usable: the upload bar tracks bytes
+   sent, then the job bar tracks tiles completed, through `Uploading`,
+   `Processing`, `Post-processing` and `Complete`. Neither bar advances on a
+   timer.
+5. **Read the result.** Crowns are drawn over the map at their real position,
+   labelled with their IDs once you are zoomed in far enough to tell them
+   apart. Click one - or step through them with the inspector's previous and
+   next controls, which is how this works without a mouse - to see its ID,
+   confidence, area and centroid.
+6. **Download** the crowns as CSV or GeoJSON. Both come from the backend, so
+   the file and the screen can never disagree.
+
+Imagery with no coordinate system has nothing to place on a map, so its crowns
+are drawn over the uploaded picture itself in the **Imagery** view instead. In
+that case every square-metre figure is blank and the panel says why, rather
+than substituting a number derived from an assumed ground resolution.
+
+---
+
 ## API
 
 Interactive documentation is at **`/docs`**, generated from the code, so the
@@ -790,8 +825,9 @@ such rather than a square-metre value that looks authoritative and is not.
    background jobs with tile-based progress, the full result payload, and CSV
    and GeoJSON downloads, with the pipeline's typed errors mapped onto the
    existing error codes. **Done.**
-7. **Results and interaction** - crown polygons on the map, click-to-inspect
-   (Crown ID, confidence, area, centroid), the full metrics panel.
+7. ~~**Results and interaction**~~ - crown polygons on the map with their IDs,
+   click-to-inspect (Crown ID, confidence, area, centroid), the metrics panel,
+   the score distribution, staged progress, and both downloads. **Done.**
 8. **Deployment** - frontend on Vercel, backend on Render or Fly.
 
 ---

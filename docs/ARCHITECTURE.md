@@ -3,15 +3,16 @@
 This document describes how the system is put together, why it is split the way
 it is, and which parts are deliberately not built yet.
 
-> **Status: backend complete.** Engines, tiling, deduplication, CRS handling,
+> **Status: complete end to end.** Engines, tiling, deduplication, CRS handling,
 > boundary parsing and measurement, clipping, area measurement, export, and the
-> HTTP layer that serves all of it are implemented and covered by 404 tests.
+> HTTP layer that serves all of it are implemented and covered by 413 tests.
 > Imagery goes in over `POST /api/analyze`, progress comes back from
 > `GET /api/jobs/{id}`, and the measured result and both downloads come back
-> from `GET /api/results/{id}`. What remains is the browser interface that puts
-> it in front of a user — see [Not built yet](#not-built-yet). Nothing in the UI
-> currently fabricates a result to stand in for that gap; controls that cannot
-> do real work are disabled with the reason shown.
+> from `GET /api/results/{id}`; the browser drives all of that, draws the crowns,
+> and downloads both exports. What remains is deployment configuration — see
+> [Not built yet](#not-built-yet). Nothing in the UI fabricates a figure: every
+> number on screen comes from an analysis response, and a control that cannot do
+> real work is disabled with the reason shown.
 
 ## Shape of the system
 
@@ -396,18 +397,20 @@ and only one of them is safe to take from the client.
 frontend/src/
   App.tsx              state owner: capabilities, files, params, results
   components/
-    Header.tsx         product identity
-    Sidebar.tsx        upload, boundary, detection settings, run control
-    MapView.tsx        MapLibre map / raster imagery preview, boundary layer,
-                       crown overlay
-    ResultsPanel.tsx   metrics, confidence distribution, CSV + GeoJSON export
-    Limitations.tsx    permanently visible, not hidden behind a disclosure
-    Dropzone.tsx       shared file-input primitive
+    Header.tsx          product identity, backend status
+    Sidebar.tsx         upload, boundary, detection settings, progress, run
+    MapView.tsx         MapLibre map and pixel view; boundary and crown layers
+    ResultsPanel.tsx    metrics, warnings, downloads, method, capabilities
+    CrownInspector.tsx  one crown in detail, and keyboard access to all of them
+    ConfidenceChart.tsx the score distribution, as plain bars
+    Limitations.tsx     permanently visible, not hidden behind a disclosure
+    Dropzone.tsx        shared file-input primitive
   lib/
-    api.ts             typed fetch wrapper preserving the server's error code
-    basemaps.ts        key-free raster basemap styles
-    format.ts          number and unit formatting
-  types.ts             shared response types mirroring backend/app/schemas.py
+    api.ts              typed fetch wrapper preserving the server's error code
+    useAnalysis.ts      submit, poll, collect; owns the waiting
+    basemaps.ts         key-free raster basemap styles
+    format.ts           number and unit formatting
+  types.ts              shared response types mirroring the API payloads
 ```
 
 State lives in `App.tsx` and flows down as props. There is no state-management
@@ -428,6 +431,62 @@ MapLibre style, taking every source and layer with it, so the boundary layer is
 re-added on `styledata` rather than only when the boundary changes. It is drawn
 in amber: the layer sits over satellite imagery of a forest, and a green
 outline on green canopy is an outline nobody can see.
+
+### Why the browser polls instead of waiting
+
+`useAnalysis` submits, polls `GET /api/jobs/{id}` once a second, and fetches the
+result when the job finishes. That mirrors the backend's own shape and keeps the
+one property that matters: nothing in the interface is blocked while an analysis
+runs. The upload uses `XMLHttpRequest` rather than `fetch` for a single reason —
+it is the only way to observe upload progress, and an indeterminate spinner over
+a five-minute upload of a large GeoTIFF tells the user nothing.
+
+The phase shown — `Uploading`, `Processing`, `Post-processing`, `Complete`,
+`Error` — is derived from the job's own `stage`, and the bar from bytes sent and
+then tiles completed. Neither advances on a timer. A progress bar driven by
+elapsed time reports how long the user has waited, which they already know, and
+implies a completion estimate the server has not made.
+
+### Why there are two views of the same result
+
+A crown carries two geometries, and which one exists decides what can be shown.
+`geometry` is WGS84 and is null for imagery with no coordinate system;
+`geometry_px` is measured from the image and is therefore always present.
+
+So the map draws `geometry` over a basemap, and the pixel view draws
+`geometry_px` over the uploaded picture in an SVG whose `viewBox` is the image's
+own pixel grid — the browser does the scaling, and it stays correct at any window
+size. Without the second view, crowns found in a plain PNG could not be shown at
+all, and the alternative — assuming a ground resolution so that everything has
+map coordinates — would put fabricated positions on screen.
+
+Crown IDs are a MapLibre symbol layer above zoom 17. Below that, a thousand
+overlapping numbers is not a label; the inspector names the selected crown in
+full regardless.
+
+### Why the inspector has previous and next controls
+
+Clicking a polygon is a mouse-only gesture. Stepping through the crowns from the
+keyboard is how the same information is reachable without one, and the map pans
+to whichever crown is selected however it was selected.
+
+### Why the exports are fetched rather than linked
+
+Both downloads go through `fetch` and a blob rather than a plain `<a href>`. A
+link pointed at a job the server has forgotten downloads the JSON error body as
+a file named `crowns.csv`, which the user has to open to discover is broken;
+fetching first means a failure is reported as a failure. The file itself is
+always generated by the backend — a CSV assembled in the browser would be a
+second implementation of the same numbers, and two implementations of one number
+eventually disagree.
+
+### Why `types.ts` is not the whole contract
+
+TypeScript will compile happily against a declaration the server no longer
+honours; the mismatch surfaces as a blank metric or a map with no crowns on it.
+`tests/backend/test_frontend_contract.py` asserts the presence of every key the
+interface reads, so a renamed field fails a test instead of quietly emptying a
+panel.
 
 ## Development and deployment
 
@@ -488,18 +547,21 @@ recorded from an earlier run.
 | Submit/poll/collect, downloads, validation, CORS | `tests/backend/test_analysis_api.py` |
 | Job lifecycle, eviction, progress reporting | `tests/backend/test_jobs.py` |
 | The error envelope, and that 500s carry no traceback | `tests/backend/test_errors.py` |
+| The payload keys the browser reads | `tests/backend/test_frontend_contract.py` |
 | Engines, registry, pixel-space primitives | `tests/ml/` |
 
 ## Not built yet
 
 Listed so the gap is explicit rather than discovered:
 
-- Crown polygon rendering and click-to-inspect in the map
-- Frontend wiring to the analysis endpoints; the detection metrics still show
-  em dashes and the Run control is disabled with its reason. Boundary figures
-  are real, because they come from a real parse of a real file
 - A job store that survives a restart or a second worker. The current one is
   in-process memory, bounded at 50 jobs, and says so in the 404 it returns for
   an id it has forgotten
-- Cancelling a running analysis
+- Cancelling a running analysis. The browser can stop watching one, which
+  releases the page, but the work on the server runs to completion
+- Rendering the uploaded GeoTIFF itself in the browser. The map shows its crowns
+  at their real position over a basemap; the pixel view is available only for
+  formats the browser can decode
+- Automated tests for the frontend. The payload contract is covered from the
+  backend side; the React components are not
 - Deployment configuration for a hosted environment
