@@ -36,6 +36,7 @@ import logging
 import math
 import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -62,6 +63,17 @@ from .dedup import DEFAULT_IOU_THRESHOLD, Candidate, suppress
 log = logging.getLogger(__name__)
 
 CONFIDENCE_BINS = 10
+
+ProgressCallback = Callable[[str, float], None]
+"""Called as `(stage, fraction)` while an analysis runs.
+
+`fraction` moves from 0.0 to 1.0 and is derived from tiles completed, not from
+elapsed time: a progress bar that is really a stopwatch tells the user how long
+they have waited, which they already know. Detection occupies the middle of the
+range because it is the only stage whose length depends on the image.
+"""
+
+_DETECTION_BAND = (0.15, 0.85)
 
 
 @dataclass(frozen=True)
@@ -193,6 +205,14 @@ class AnalysisResult:
     crowns: list[Crown]
     summary: AnalysisSummary
     raster: raster.RasterInfo
+    source_name: str
+    """What to call this image when reporting on it.
+
+    The stored file is named by the server - an upload's own name is never used
+    as a path - so without this a result and its exports would identify the
+    imagery by a random hex string that means nothing to the person who
+    uploaded it.
+    """
     georeferenced: bool
     source_crs: str | None
     measurement_crs: str | None
@@ -225,6 +245,8 @@ def analyze_image(
     tile_overlap: int = 160,
     max_pixels_without_tiling: int = 4_000_000,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
+    on_progress: ProgressCallback | None = None,
+    source_name: str | None = None,
 ) -> AnalysisResult:
     """Detect and measure tree crowns in an image.
 
@@ -239,6 +261,12 @@ def analyze_image(
         min_crown_area_px: Minimum crown area in pixels. Used on its own for
             imagery without georeferencing, and as a floor otherwise.
         engine: Engine name, or "auto" for the best one actually available.
+        source_name: What to call the image in the result and its exports.
+            Defaults to the file's own name, which is right for a local file
+            and wrong for an upload stored under a generated name.
+        on_progress: Optional `(stage, fraction)` callback. Exceptions raised by
+            it are swallowed: a progress reporter must never be able to fail an
+            analysis that is otherwise succeeding.
 
     Raises:
         UnsupportedFileError, InvalidRasterError: the imagery cannot be read.
@@ -250,6 +278,7 @@ def analyze_image(
     """
     started = time.perf_counter()
     image_path = Path(image_path)
+    _report(on_progress, "reading", 0.02)
 
     info = raster.describe(image_path)
     warnings: list[str] = list(info.warnings)
@@ -299,8 +328,16 @@ def analyze_image(
         iou_threshold=iou_threshold,
     )
 
+    _report(on_progress, "detecting", _DETECTION_BAND[0])
     detections, tiles_processed = _detect_all_tiles(
-        info, detector, params, tile_size, tile_overlap, max_pixels_without_tiling, warnings
+        info,
+        detector,
+        params,
+        tile_size,
+        tile_overlap,
+        max_pixels_without_tiling,
+        warnings,
+        on_progress=on_progress,
     )
     raw_count = len(detections)
 
@@ -317,6 +354,7 @@ def analyze_image(
     kept = suppress(candidates, iou_threshold=iou_threshold)
     duplicates_removed = len(candidates) - len(kept)
 
+    _report(on_progress, "measuring", _DETECTION_BAND[1])
     crowns, excluded_by_boundary = _build_crowns(
         kept,
         info=info,
@@ -329,6 +367,7 @@ def analyze_image(
         confidence_kind=detector.confidence_kind,
     )
 
+    _report(on_progress, "summarising", 0.95)
     summary = _summarise(
         crowns,
         info=info,
@@ -349,6 +388,7 @@ def analyze_image(
         crowns=crowns,
         summary=summary,
         raster=info,
+        source_name=source_name or image_path.name,
         georeferenced=info.is_georeferenced,
         source_crs=_crs_label(source_crs),
         measurement_crs=_crs_label(metric_crs),
@@ -502,10 +542,12 @@ def _detect_all_tiles(
     tile_overlap: int,
     max_pixels_without_tiling: int,
     warnings: list[str],
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[CrownDetection], int]:
     """Run the engine over every tile, returning detections in raster pixel space."""
     windows = raster.plan_tiling(info, tile_size, tile_overlap, max_pixels_without_tiling)
     detections: list[CrownDetection] = []
+    low, high = _DETECTION_BAND
 
     with rasterio.open(info.path) as src:
         for index, window in enumerate(windows, start=1):
@@ -518,6 +560,7 @@ def _detect_all_tiles(
                     detection.polygon, float(window.col_off), float(window.row_off)
                 )
                 detections.append(detection)
+            _report(on_progress, "detecting", low + (high - low) * index / len(windows))
             if index % 25 == 0 or index == len(windows):
                 log.info(
                     "Processed %d/%d tiles, %d raw detections so far",
@@ -527,6 +570,21 @@ def _detect_all_tiles(
                 )
 
     return detections, len(windows)
+
+
+def _report(on_progress: ProgressCallback | None, stage: str, fraction: float) -> None:
+    """Tell the caller where the analysis has got to, if it asked.
+
+    A broken progress reporter is a reporting problem, not an analysis problem,
+    so its exceptions are logged and dropped rather than losing work that has
+    already succeeded.
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(stage, max(0.0, min(1.0, fraction)))
+    except Exception:  # pragma: no cover - defensive
+        log.warning("Progress callback failed at stage %s", stage, exc_info=True)
 
 
 def _build_crowns(
