@@ -1,0 +1,44 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# --- Application data (uploads, results, cached model weights) ---------------
+backend/.data/
+*.pth
+*.pt
+
+# --- Sample imagery (large binaries; see sample_data/README.md) --------------
+sample_data/*
+!sample_data/README.md
+!sample_data/.gitkeep
+
+# --- Environment ------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
