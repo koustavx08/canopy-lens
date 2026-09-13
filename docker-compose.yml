@@ -1,0 +1,49 @@
+# CanopyLens local stack: FastAPI backend + nginx-served frontend.
+#
+#   docker compose up --build
+#   -> web  http://localhost:8080
+#   -> api  http://localhost:8000/api/health
+#
+# The frontend container proxies /api to the api container, so the browser talks
+# to a single origin and CORS never enters the picture.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: canopylens-api
+    environment:
+      CANOPYLENS_ENVIRONMENT: ${CANOPYLENS_ENVIRONMENT:-development}
+      CANOPYLENS_LOG_LEVEL: ${CANOPYLENS_LOG_LEVEL:-INFO}
+      CANOPYLENS_DATA_DIR: /app/backend/.data
+      CANOPYLENS_MAX_UPLOAD_MB: ${CANOPYLENS_MAX_UPLOAD_MB:-512}
+      CANOPYLENS_CORS_ORIGINS: ${CANOPYLENS_CORS_ORIGINS:-http://localhost:8080}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Uploads and results survive container rebuilds.
+      - canopylens-data:/app/backend/.data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  web:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      args:
+        # Empty: the bundle calls /api on its own origin and nginx proxies it.
+        VITE_API_BASE_URL: ""
+    image: canopylens-web
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  canopylens-data:
