@@ -139,7 +139,7 @@ def _metadata(result: AnalysisResult) -> dict:
     summary = result.summary
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source_image": result.raster.path.name,
+        "source_image": result.source_name,
         "image_size_px": [result.raster.width, result.raster.height],
         "georeferenced": result.georeferenced,
         "source_crs": result.source_crs,
@@ -150,7 +150,7 @@ def _metadata(result: AnalysisResult) -> dict:
         "confidence_threshold": result.confidence_threshold,
         "min_crown_area_m2": result.min_crown_area_m2,
         "boundary_applied": result.boundary_applied,
-        "boundary": _boundary_metadata(result),
+        "boundary": boundary_metadata(result),
         "tree_count": summary.tree_count,
         # The three areas are named apart on purpose. `analyzed_area_m2` is the
         # ground examined and is the denominator of coverage;
@@ -170,7 +170,7 @@ def _metadata(result: AnalysisResult) -> dict:
     }
 
 
-def _boundary_metadata(result: AnalysisResult) -> dict | None:
+def boundary_metadata(result: AnalysisResult) -> dict | None:
     """The boundary's own figures, kept distinct from the scene's.
 
     The boundary area is what the user drew. The analysed area is the part of
@@ -200,7 +200,7 @@ def _provenance_lines(result: AnalysisResult) -> list[str]:
     size = f"{result.raster.width}x{result.raster.height} px"
     lines = [
         f"CanopyLens crown export - generated {generated}",
-        f"Source image: {result.raster.path.name} ({size})",
+        f"Source image: {result.source_name} ({size})",
         f"Engine: {result.engine} (confidence is a {result.confidence_kind} score)",
         f"Confidence threshold: {result.confidence_threshold}",
         f"Trees detected: {summary.tree_count}",
