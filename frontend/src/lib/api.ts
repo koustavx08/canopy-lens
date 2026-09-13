@@ -78,3 +78,148 @@ export function previewBoundary(file: File, signal?: AbortSignal): Promise<Bound
   body.append("file", file);
   return request<BoundaryPreview>("/api/boundary/preview", { method: "POST", body, signal });
 }
+
+// ---------------------------------------------------------------------------
+// Analysis
+// ---------------------------------------------------------------------------
+
+import type {
+  AnalysisResult,
+  DetectionSettings,
+  JobAccepted,
+  JobStatus,
+} from "../types";
+
+/**
+ * Submit imagery for analysis.
+ *
+ * Uses XMLHttpRequest rather than fetch for one reason: it is the only way to
+ * observe upload progress. A GeoTIFF can be hundreds of megabytes, and an
+ * indeterminate spinner over a five-minute upload tells the user nothing about
+ * whether anything is happening.
+ */
+export function startAnalysis(
+  image: File,
+  boundary: File | null,
+  settings: DetectionSettings,
+  options: { onUploadProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<JobAccepted> {
+  const body = new FormData();
+  body.append("image", image);
+  if (boundary) body.append("boundary", boundary);
+  body.append("confidence_threshold", String(settings.confidenceThreshold));
+  body.append("min_crown_area_m2", String(settings.minCrownAreaM2));
+  if (settings.engine) body.append("engine", settings.engine);
+
+  return new Promise<JobAccepted>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", apiUrl("/api/analyze"));
+    xhr.responseType = "text";
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) options.onUploadProgress?.(event.loaded / event.total);
+    };
+
+    xhr.onerror = () =>
+      reject(
+        new ApiError(
+          {
+            code: "network_unreachable",
+            message: "Could not reach the CanopyLens backend.",
+            detail: {},
+          },
+          0,
+        ),
+      );
+
+    xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+
+    xhr.onload = () => {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(xhr.responseText);
+      } catch {
+        /* fall through to the status-derived message below */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(parsed as JobAccepted);
+        return;
+      }
+      const envelope = (parsed as { error?: ApiErrorBody } | null)?.error;
+      reject(
+        new ApiError(
+          envelope?.message
+            ? envelope
+            : {
+                code: `http_${xhr.status}`,
+                message: xhr.statusText || "The analysis could not be started.",
+                detail: {},
+              },
+          xhr.status,
+        ),
+      );
+    };
+
+    options.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(body);
+  });
+}
+
+export function fetchJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+  return request<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}`, { signal });
+}
+
+export function fetchResult(jobId: string, signal?: AbortSignal): Promise<AnalysisResult> {
+  return request<AnalysisResult>(`/api/results/${encodeURIComponent(jobId)}`, { signal });
+}
+
+/**
+ * Fetch an export and hand it to the browser as a download.
+ *
+ * Deliberately not a plain link: a link to a failed job downloads the JSON
+ * error body as a file called `crowns.csv`, which is a broken file the user has
+ * to open to understand. Fetching first means a failure is reported as one.
+ */
+export async function downloadExport(jobId: string, kind: "csv" | "geojson"): Promise<void> {
+  const path = `/api/results/${encodeURIComponent(jobId)}/${kind}`;
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path));
+  } catch (cause) {
+    throw new ApiError(
+      { code: "network_unreachable", message: "Could not reach the backend.", detail: { cause: String(cause) } },
+      0,
+    );
+  }
+  if (!response.ok) {
+    let body: ApiErrorBody = {
+      code: `http_${response.status}`,
+      message: "The download could not be produced.",
+      detail: {},
+    };
+    try {
+      const parsed = await response.json();
+      if (parsed?.error?.message) body = parsed.error as ApiErrorBody;
+    } catch {
+      /* keep the status-derived message */
+    }
+    throw new ApiError(body, response.status);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filenameFrom(response) ?? `crowns-${jobId}.${kind}`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** The server names the file; we only fall back if it did not. */
+function filenameFrom(response: Response): string | null {
+  const header = response.headers.get("Content-Disposition");
+  const match = header?.match(/filename="?([^"\r\n;]+)"?/i);
+  return match ? match[1] : null;
+}
