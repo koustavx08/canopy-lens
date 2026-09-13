@@ -9,3 +9,4 @@ select = ["E", "F", "I", "UP", "B"]
 # Depends() in a parameter default is FastAPI's documented dependency-injection
 # pattern, not the mutable-default bug B008 exists to catch.
 "app/routers/*.py" = ["B008"]
+"app/main.py" = ["B008"]

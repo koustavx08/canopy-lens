@@ -101,6 +101,57 @@ class BoundaryPreviewResponse(BaseModel):
     )
 
 
+class JobAcceptedResponse(BaseModel):
+    """The receipt for a submitted analysis.
+
+    Returned with 202: the files have been accepted and validated, and the work
+    has been scheduled. Nothing has been detected yet, so no figure appears here
+    that could be mistaken for a result.
+    """
+
+    job_id: str
+    status: str = Field(description="'queued' - the analysis has not started yet.")
+    status_url: str = Field(description="Poll this for progress.")
+    result_url: str = Field(description="Available once the status is 'completed'.")
+
+
+class JobErrorBody(BaseModel):
+    code: str
+    message: str
+    detail: dict = {}
+
+
+class JobStatusResponse(BaseModel):
+    """Where an analysis has got to.
+
+    `progress` is derived from tiles completed, not from elapsed time. It is a
+    measure of work done; it is not an estimate of time remaining, and the API
+    does not offer one it cannot compute.
+    """
+
+    job_id: str
+    status: str = Field(description="queued, running, completed or failed.")
+    stage: str = Field(
+        description=(
+            "Which part of the pipeline is current: reading, detecting, "
+            "measuring, summarising."
+        )
+    )
+    progress: float = Field(ge=0.0, le=1.0, description="Fraction of the tiles processed.")
+    image_name: str
+    boundary_name: str | None = None
+    parameters: dict
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    processing_time_seconds: float | None = Field(
+        default=None,
+        description="Time spent analysing, excluding any time spent queued.",
+    )
+    error: JobErrorBody | None = None
+    result_url: str | None = None
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str

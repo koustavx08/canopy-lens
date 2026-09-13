@@ -9,14 +9,15 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .config import get_settings
+from .config import Settings, get_settings
 from .errors import register_error_handlers
 from .logging_config import configure_logging
-from .routers import boundary, health
+from .routers import analysis, boundary, health
+from .schemas import HealthResponse
 
 log = logging.getLogger("canopylens")
 
@@ -65,6 +66,13 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
     app.include_router(health.router, prefix="/api")
     app.include_router(boundary.router, prefix="/api")
+    app.include_router(analysis.router, prefix="/api")
+
+    # Container orchestrators and uptime checks look for /health at the root,
+    # and it costs one route to be found there as well as under /api.
+    @app.get("/health", response_model=HealthResponse, tags=["system"], summary="Liveness probe")
+    def health_at_root(settings: Settings = Depends(get_settings)) -> HealthResponse:
+        return health.health(settings)
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:
