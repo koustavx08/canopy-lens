@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canopylens-ml"
+version = "0.1.0"
+description = "Tree crown detection engines for CanopyLens"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.setuptools]
+packages = ["canopylens_ml", "canopylens_ml.engines"]
