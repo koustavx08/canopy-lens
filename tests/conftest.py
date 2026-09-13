@@ -99,6 +99,65 @@ def utm_to_lonlat(points: list[tuple[float, float]], crs: str = UTM_CRS) -> list
     return [transformer.transform(x, y) for x, y in points]
 
 
+def kml_document(polygons: list[tuple[list[tuple[float, float]], list[list[tuple[float, float]]]]]) -> str:
+    """A KML document with one Placemark per (shell, holes) pair.
+
+    Multiple placemarks is how Google Earth exports a stand split by a road or
+    a river, so it is the shape the multi-polygon tests are written against.
+    """
+    placemarks = []
+    for shell, holes in polygons:
+        inner = "".join(
+            "<innerBoundaryIs><LinearRing><coordinates>"
+            f"{_coordinate_text(hole)}"
+            "</coordinates></LinearRing></innerBoundaryIs>"
+            for hole in holes
+        )
+        placemarks.append(
+            "<Placemark><Polygon><outerBoundaryIs><LinearRing><coordinates>"
+            f"{_coordinate_text(shell)}"
+            "</coordinates></LinearRing></outerBoundaryIs>"
+            f"{inner}</Polygon></Placemark>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+        f"{''.join(placemarks)}"
+        "</Document></kml>"
+    )
+
+
+def _coordinate_text(ring: list[tuple[float, float]]) -> str:
+    return " ".join(f"{lon:.10f},{lat:.10f},0" for lon, lat in ring)
+
+
+def utm_rect(
+    min_x: float, min_y: float, max_x: float, max_y: float
+) -> list[tuple[float, float]]:
+    """A rectangle in projected metres, counter-clockwise.
+
+    Working in metres and converting once at the end keeps the test's intent -
+    "75 metres by 150 metres" - visible, instead of hiding it in a set of
+    decimal degrees nobody can check by eye.
+    """
+    return [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+
+
+def write_utm_kml(
+    path: Path,
+    rects: list[list[tuple[float, float]]],
+    holes: list[list[tuple[float, float]]] | None = None,
+) -> Path:
+    """Write a KML whose polygons are given in UTM metres, converted to WGS84."""
+    hole_rings = [utm_to_lonlat(hole) for hole in (holes or [])]
+    polygons = [
+        (utm_to_lonlat(rect), hole_rings if index == 0 else [])
+        for index, rect in enumerate(rects)
+    ]
+    path.write_text(kml_document(polygons), encoding="utf-8")
+    return path
+
+
 # --- fixtures ------------------------------------------------------------
 
 # Five crowns of distinct, known radii. Their true areas in square metres are
@@ -111,6 +170,13 @@ SCENE_CIRCLES = [
     (250, 500, 20),
 ]
 SCENE_SIZE = 600
+
+# The georeferenced fixture raster covers exactly this ground: a 150 m
+# square, which makes every expected boundary area in the tests arithmetic.
+RASTER_MIN_X = UTM_ORIGIN_X
+RASTER_MAX_X = UTM_ORIGIN_X + SCENE_SIZE * PIXEL_METRES
+RASTER_MAX_Y = UTM_ORIGIN_Y
+RASTER_MIN_Y = UTM_ORIGIN_Y - SCENE_SIZE * PIXEL_METRES
 
 
 @pytest.fixture(scope="session")
@@ -160,3 +226,76 @@ def elsewhere_kml(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+@pytest.fixture
+def kmz_left_half(tmp_path: Path, left_half_kml: Path) -> Path:
+    """The same western-half boundary, zipped as a KMZ."""
+    import zipfile
+
+    path = tmp_path / "left_half.kmz"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("doc.kml", left_half_kml.read_text(encoding="utf-8"))
+    return path
+
+
+@pytest.fixture
+def two_part_kml(tmp_path: Path) -> Path:
+    """Two disjoint 75 m squares: the north-west and south-east quarters.
+
+    Together they enclose 11250 m2, the same total as the western half, but as
+    two separate stands rather than one.
+    """
+    mid_x = RASTER_MIN_X + 75.0
+    mid_y = RASTER_MIN_Y + 75.0
+    return write_utm_kml(
+        tmp_path / "two_parts.kml",
+        [
+            utm_rect(RASTER_MIN_X, mid_y, mid_x, RASTER_MAX_Y),
+            utm_rect(mid_x, RASTER_MIN_Y, RASTER_MAX_X, mid_y),
+        ],
+    )
+
+
+@pytest.fixture
+def holed_kml(tmp_path: Path) -> Path:
+    """The whole raster with a 20 m x 20 m clearing cut out of it.
+
+    The clearing is centred on the smallest planted crown, so a boundary that
+    honours holes must both measure 400 m2 less and drop that crown.
+    """
+    hole_centre_x = UTM_ORIGIN_X + 500 * PIXEL_METRES
+    hole_centre_y = UTM_ORIGIN_Y - 250 * PIXEL_METRES
+    return write_utm_kml(
+        tmp_path / "holed.kml",
+        [utm_rect(RASTER_MIN_X, RASTER_MIN_Y, RASTER_MAX_X, RASTER_MAX_Y)],
+        holes=[
+            utm_rect(
+                hole_centre_x - 10.0,
+                hole_centre_y - 10.0,
+                hole_centre_x + 10.0,
+                hole_centre_y + 10.0,
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def overhanging_kml(tmp_path: Path) -> Path:
+    """A 300 m x 150 m boundary of which the imagery covers only the western half."""
+    return write_utm_kml(
+        tmp_path / "overhanging.kml",
+        [utm_rect(RASTER_MIN_X, RASTER_MIN_Y, RASTER_MAX_X + 150.0, RASTER_MAX_Y)],
+    )
+
+
+@pytest.fixture
+def detached_part_kml(tmp_path: Path) -> Path:
+    """The western half, plus a second stand 40 km east that no imagery covers."""
+    return write_utm_kml(
+        tmp_path / "detached.kml",
+        [
+            utm_rect(RASTER_MIN_X, RASTER_MIN_Y, RASTER_MIN_X + 75.0, RASTER_MAX_Y),
+            utm_rect(RASTER_MIN_X + 40_000.0, RASTER_MIN_Y, RASTER_MIN_X + 40_100.0, RASTER_MIN_Y + 100.0),
+        ],
+    )

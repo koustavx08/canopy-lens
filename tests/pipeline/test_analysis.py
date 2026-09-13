@@ -237,6 +237,207 @@ class TestBoundaryClipping:
             analyze_image(plain_png, boundary_path=left_half_kml, **CLASSICAL)
 
 
+class TestBoundaryMeasurement:
+    """The boundary is measured in its own right, apart from the scene.
+
+    Three areas are in play and only one of them is the denominator of
+    coverage. These tests exist so the three cannot quietly become one.
+    """
+
+    def test_the_boundary_area_is_the_ground_the_file_encloses(self, utm_raster, left_half_kml):
+        clipped = analyze_image(utm_raster, boundary_path=left_half_kml, **CLASSICAL)
+        # 75 m x 150 m, drawn in the fixture. Not a detection, not a coverage.
+        assert clipped.boundary is not None
+        assert clipped.boundary.area_m2 == pytest.approx(75 * 150, rel=1e-6)
+
+    def test_boundary_area_analysed_area_and_crown_area_are_three_numbers(
+        self, utm_raster, left_half_kml
+    ):
+        clipped = analyze_image(utm_raster, boundary_path=left_half_kml, **CLASSICAL)
+        boundary_area = clipped.boundary.area_m2
+        analysed = clipped.summary.analyzed_area_m2
+        canopy = clipped.summary.total_canopy_area_m2
+
+        # Here the imagery covers the whole boundary, so the first two agree -
+        # and the crown area is an order of magnitude smaller than either.
+        assert analysed == pytest.approx(boundary_area, rel=1e-6)
+        assert canopy < analysed / 2
+
+    def test_coverage_uses_the_analysed_area_not_the_boundary_area(
+        self, utm_raster, overhanging_kml
+    ):
+        # The boundary is twice the size of the image. If coverage were taken
+        # against the boundary it would be halved, which is the exact mistake
+        # this pipeline is built to avoid.
+        clipped = analyze_image(utm_raster, boundary_path=overhanging_kml, **CLASSICAL)
+        summary = clipped.summary
+        against_analysed = summary.total_canopy_area_m2 / summary.analyzed_area_m2 * 100
+        against_boundary = summary.total_canopy_area_m2 / clipped.boundary.area_m2 * 100
+
+        assert summary.canopy_coverage_pct == pytest.approx(against_analysed, abs=0.01)
+        assert summary.canopy_coverage_pct != pytest.approx(against_boundary, abs=0.01)
+
+    def test_the_reported_measurement_crs_is_the_imagery_s_own(self, utm_raster, left_half_kml):
+        clipped = analyze_image(utm_raster, boundary_path=left_half_kml, **CLASSICAL)
+        assert clipped.boundary.measurement_crs == clipped.measurement_crs == "EPSG:32617"
+
+    def test_no_boundary_means_no_boundary_figures(self, utm_raster):
+        whole = analyze_image(utm_raster, **CLASSICAL)
+        assert whole.boundary is None
+        assert whole.boundary_applied is False
+
+
+class TestBoundaryLargerThanTheImagery:
+    """A boundary the image does not cover is legitimate - and must be said."""
+
+    @pytest.fixture
+    def clipped(self, utm_raster, overhanging_kml):
+        return analyze_image(utm_raster, boundary_path=overhanging_kml, **CLASSICAL)
+
+    def test_the_boundary_keeps_its_own_full_area(self, clipped):
+        # 300 m x 150 m: the file describes that much ground whether or not
+        # anybody photographed it.
+        assert clipped.boundary.area_m2 == pytest.approx(300 * 150, rel=1e-6)
+
+    def test_the_analysed_area_is_only_what_the_imagery_reaches(self, clipped):
+        assert clipped.summary.analyzed_area_m2 == pytest.approx(150 * 150, rel=1e-6)
+
+    def test_the_shortfall_is_reported_as_a_percentage(self, clipped):
+        assert clipped.boundary.imagery_covers_pct == pytest.approx(50.0, abs=0.01)
+        assert clipped.boundary.area_within_imagery_m2 == pytest.approx(150 * 150, rel=1e-6)
+
+    def test_the_user_is_warned_rather_than_left_to_notice(self, clipped):
+        assert any("% of the boundary" in warning for warning in clipped.warnings)
+
+    def test_a_fully_covered_boundary_produces_no_such_warning(self, utm_raster, left_half_kml):
+        clipped = analyze_image(utm_raster, boundary_path=left_half_kml, **CLASSICAL)
+        assert clipped.boundary.imagery_covers_pct == pytest.approx(100.0, abs=0.01)
+        assert not any("% of the boundary" in warning for warning in clipped.warnings)
+
+
+class TestMultiPartBoundaries:
+    def test_two_stands_are_analysed_together(self, utm_raster, two_part_kml):
+        clipped = analyze_image(utm_raster, boundary_path=two_part_kml, **CLASSICAL)
+        assert clipped.boundary.part_count == 2
+        # Two disjoint 75 m squares, one in each opposite corner.
+        assert clipped.boundary.area_m2 == pytest.approx(2 * 75 * 75, rel=1e-6)
+        assert clipped.summary.analyzed_area_m2 == pytest.approx(2 * 75 * 75, rel=1e-6)
+
+    def test_only_crowns_inside_one_of_the_parts_survive(self, utm_raster, two_part_kml):
+        clipped = analyze_image(utm_raster, boundary_path=two_part_kml, **CLASSICAL)
+        half = SCENE_SIZE / 2
+        for crown in clipped.crowns:
+            column, row = crown.centroid
+            north_west = column <= half and row <= half
+            south_east = column >= half and row >= half
+            assert north_west or south_east
+
+    def test_a_part_outside_the_imagery_is_reported_not_silently_dropped(
+        self, utm_raster, detached_part_kml
+    ):
+        clipped = analyze_image(utm_raster, boundary_path=detached_part_kml, **CLASSICAL)
+        assert clipped.boundary.part_count == 2
+        assert clipped.boundary.parts_intersecting_imagery == 1
+        assert any("lie entirely outside the imagery" in w for w in clipped.warnings)
+
+    def test_the_detached_part_still_counts_towards_the_boundary_area(
+        self, utm_raster, detached_part_kml
+    ):
+        # The file encloses both stands; the imagery only reaches one. Those
+        # are different facts and both are reported.
+        clipped = analyze_image(utm_raster, boundary_path=detached_part_kml, **CLASSICAL)
+        assert clipped.boundary.area_m2 == pytest.approx(75 * 150 + 100 * 100, rel=1e-4)
+        assert clipped.summary.analyzed_area_m2 == pytest.approx(75 * 150, rel=1e-6)
+
+
+class TestBoundariesWithHoles:
+    def test_a_clearing_is_removed_from_the_analysed_area(self, utm_raster, holed_kml):
+        clipped = analyze_image(utm_raster, boundary_path=holed_kml, **CLASSICAL)
+        assert clipped.boundary.has_holes is True
+        # The whole 150 m square less a 20 m square clearing.
+        assert clipped.boundary.area_m2 == pytest.approx(150 * 150 - 400, rel=1e-5)
+        assert clipped.summary.analyzed_area_m2 == pytest.approx(150 * 150 - 400, rel=1e-5)
+
+    def test_a_crown_inside_the_clearing_is_excluded(self, utm_raster, holed_kml):
+        whole = analyze_image(utm_raster, **CLASSICAL)
+        clipped = analyze_image(utm_raster, boundary_path=holed_kml, **CLASSICAL)
+        assert clipped.summary.tree_count == whole.summary.tree_count - 1
+        assert clipped.excluded_by_boundary == 1
+
+    def test_the_hole_raises_coverage_because_the_denominator_shrinks(
+        self, utm_raster, holed_kml
+    ):
+        clipped = analyze_image(utm_raster, boundary_path=holed_kml, **CLASSICAL)
+        summary = clipped.summary
+        expected = summary.total_canopy_area_m2 / summary.analyzed_area_m2 * 100
+        assert summary.canopy_coverage_pct == pytest.approx(expected, abs=0.01)
+
+
+class TestBoundaryFileFormats:
+    """The same boundary must measure the same however it was packaged."""
+
+    def test_a_kmz_gives_the_same_answer_as_the_kml_inside_it(
+        self, utm_raster, left_half_kml, kmz_left_half
+    ):
+        from_kml = analyze_image(utm_raster, boundary_path=left_half_kml, **CLASSICAL)
+        from_kmz = analyze_image(utm_raster, boundary_path=kmz_left_half, **CLASSICAL)
+
+        assert from_kmz.boundary.source_format == "KMZ"
+        assert from_kmz.summary.tree_count == from_kml.summary.tree_count
+        assert from_kmz.boundary.area_m2 == pytest.approx(from_kml.boundary.area_m2, rel=1e-9)
+        assert from_kmz.summary.analyzed_area_m2 == pytest.approx(
+            from_kml.summary.analyzed_area_m2, rel=1e-9
+        )
+
+    def test_a_geojson_in_a_projected_crs_lands_in_the_same_place(self, utm_raster, tmp_path):
+        # Declared as UTM, so its eastings must not be read as longitudes.
+        import json
+
+        from ..conftest import RASTER_MAX_Y, RASTER_MIN_X, RASTER_MIN_Y, utm_rect
+
+        ring = utm_rect(RASTER_MIN_X, RASTER_MIN_Y, RASTER_MIN_X + 75.0, RASTER_MAX_Y)
+        path = tmp_path / "half.geojson"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "Polygon",
+                    "coordinates": [[list(point) for point in [*ring, ring[0]]]],
+                    "crs": {"type": "name", "properties": {"name": "EPSG:32617"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        clipped = analyze_image(utm_raster, boundary_path=path, **CLASSICAL)
+        assert clipped.boundary.source_format == "GeoJSON"
+        assert clipped.summary.analyzed_area_m2 == pytest.approx(75 * 150, rel=1e-6)
+
+    def test_an_unreadable_boundary_stops_the_analysis_with_an_explanation(
+        self, utm_raster, tmp_path
+    ):
+        path = tmp_path / "broken.kml"
+        path.write_text("<kml><unclosed>", encoding="utf-8")
+        with pytest.raises(InvalidBoundaryError) as caught:
+            analyze_image(utm_raster, boundary_path=path, **CLASSICAL)
+        assert "xml" in str(caught.value).lower()
+
+    def test_a_boundary_with_no_polygon_stops_the_analysis(self, utm_raster, tmp_path):
+        path = tmp_path / "pins.kml"
+        path.write_text(
+            '<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><Point>'
+            "<coordinates>-81,42</coordinates></Point></Placemark></kml>",
+            encoding="utf-8",
+        )
+        with pytest.raises(InvalidBoundaryError):
+            analyze_image(utm_raster, boundary_path=path, **CLASSICAL)
+
+    def test_the_refusal_to_overlap_names_both_extents(self, utm_raster, elsewhere_kml):
+        with pytest.raises(InvalidBoundaryError) as caught:
+            analyze_image(utm_raster, boundary_path=elsewhere_kml, **CLASSICAL)
+        detail = caught.value.detail
+        assert "boundary_bounds_wgs84" in detail
+        assert "imagery_bounds_wgs84" in detail
+
+
 class TestUngeoreferencedImagery:
     @pytest.fixture
     def plain_result(self, plain_png):
