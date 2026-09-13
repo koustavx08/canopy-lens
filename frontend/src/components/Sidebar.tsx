@@ -1,10 +1,14 @@
 import { Dropzone } from "./Dropzone";
-import type { Capabilities, DetectionSettings } from "../types";
+import { formatArea } from "../lib/format";
+import type { BoundaryPreview, Capabilities, DetectionSettings } from "../types";
 
 interface Props {
   capabilities: Capabilities | null;
   imageFile: File | null;
   boundaryFile: File | null;
+  boundaryPreview: BoundaryPreview | null;
+  boundaryError: string | null;
+  boundaryLoading: boolean;
   settings: DetectionSettings;
   onImageSelect: (file: File | null) => void;
   onBoundarySelect: (file: File | null) => void;
@@ -21,6 +25,9 @@ export function Sidebar({
   capabilities,
   imageFile,
   boundaryFile,
+  boundaryPreview,
+  boundaryError,
+  boundaryLoading,
   settings,
   onImageSelect,
   onBoundarySelect,
@@ -30,6 +37,7 @@ export function Sidebar({
   running,
 }: Props) {
   const maxBytes = (capabilities?.limits.max_upload_mb ?? 512) * 1024 * 1024;
+  const maxBoundaryBytes = (capabilities?.limits.max_boundary_upload_mb ?? 32) * 1024 * 1024;
 
   return (
     <aside className="flex w-full shrink-0 flex-col gap-6 overflow-y-auto border-line bg-surface-1 p-4 lg:w-[340px] lg:border-r lg:p-5">
@@ -42,14 +50,22 @@ export function Sidebar({
         maxBytes={maxBytes}
       />
 
-      <Dropzone
-        label="Forest boundary"
-        hint="Drop a KML, KMZ or GeoJSON"
-        accept={capabilities?.supported_boundary_formats ?? FALLBACK_BOUNDARY}
-        file={boundaryFile}
-        onSelect={onBoundarySelect}
-        optional
-      />
+      <div>
+        <Dropzone
+          label="Forest boundary"
+          hint="Drop a KML, KMZ or GeoJSON"
+          accept={capabilities?.supported_boundary_formats ?? FALLBACK_BOUNDARY}
+          file={boundaryFile}
+          onSelect={onBoundarySelect}
+          maxBytes={maxBoundaryBytes}
+          optional
+        />
+        {boundaryFile && <BoundaryStatus
+          preview={boundaryPreview}
+          error={boundaryError}
+          loading={boundaryLoading}
+        />}
+      </div>
 
       <section className="flex flex-col gap-4 border-t border-line pt-5">
         <span className="label">Detection settings</span>
@@ -123,5 +139,54 @@ export function Sidebar({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * What the server made of the boundary file, shown next to the file itself.
+ *
+ * The area here is the ground the boundary encloses and is labelled as such.
+ * It is not the analysed area and not the canopy area; the results panel
+ * reports those separately once an analysis has run.
+ */
+function BoundaryStatus({
+  preview,
+  error,
+  loading,
+}: {
+  preview: BoundaryPreview | null;
+  error: string | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return <p className="mt-2 text-[11px] text-ink-faint">Reading boundary…</p>;
+  }
+  if (error) {
+    return <p className="mt-2 text-[11px] leading-relaxed text-danger">{error}</p>;
+  }
+  if (!preview) return null;
+  return (
+    <dl className="mt-2 flex flex-col gap-1 border-l border-line pl-3 text-[11px]">
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-ink-faint">Boundary area</dt>
+        <dd className="tabular font-mono text-ink">{formatArea(preview.area_m2)}</dd>
+      </div>
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-ink-faint">Parts</dt>
+        <dd className="tabular font-mono text-ink">
+          {preview.part_count}
+          {preview.has_holes ? " (with holes)" : ""}
+        </dd>
+      </div>
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-ink-faint">Measured in</dt>
+        <dd className="tabular font-mono text-ink">{preview.measurement_crs}</dd>
+      </div>
+      {preview.warnings.map((warning) => (
+        <p key={warning} className="mt-1 leading-relaxed text-warn">
+          {warning}
+        </p>
+      ))}
+    </dl>
   );
 }

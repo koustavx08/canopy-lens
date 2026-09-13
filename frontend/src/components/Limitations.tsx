@@ -5,6 +5,8 @@ const LIMITATIONS = [
   "Crowns clipped by the image edge or the boundary are measured only where visible.",
   "Shrubs, hedges, crops and grass can be detected as trees; the model sees vegetation, not species.",
   "Models are trained on specific regions and sensors; results shift on unfamiliar landscapes (domain shift).",
+  "A boundary is taken as drawn: the polygon is measured and clipped to, not checked against where the forest actually is.",
+  "Coverage is crown area divided by the analysed area — the ground the imagery actually covers, which may be smaller than the boundary.",
   "No ground-truth validation is performed. Nothing here is a field-verified tree inventory.",
 ];
 

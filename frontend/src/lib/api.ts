@@ -6,7 +6,7 @@
  * than a generic "something went wrong".
  */
 
-import type { ApiErrorBody, Capabilities } from "../types";
+import type { ApiErrorBody, BoundaryPreview, Capabilities } from "../types";
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
@@ -63,4 +63,18 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchCapabilities(signal?: AbortSignal): Promise<Capabilities> {
   return request<Capabilities>("/api/capabilities", { signal });
+}
+
+/**
+ * Parse and measure a boundary file server-side.
+ *
+ * The KML is not parsed in the browser: the area has to be computed in a
+ * projected coordinate system, and the one place that reprojection is done
+ * correctly is the backend. A number produced twice by two code paths is a
+ * number that will eventually disagree with itself.
+ */
+export function previewBoundary(file: File, signal?: AbortSignal): Promise<BoundaryPreview> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<BoundaryPreview>("/api/boundary/preview", { method: "POST", body, signal });
 }

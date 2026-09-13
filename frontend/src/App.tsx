@@ -3,8 +3,13 @@ import { Header } from "./components/Header";
 import { MapView } from "./components/MapView";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { Sidebar } from "./components/Sidebar";
-import { ApiError, fetchCapabilities } from "./lib/api";
-import type { Capabilities, DetectionSettings, SelectedFile } from "./types";
+import { ApiError, fetchCapabilities, previewBoundary } from "./lib/api";
+import type {
+  BoundaryPreview,
+  Capabilities,
+  DetectionSettings,
+  SelectedFile,
+} from "./types";
 
 const PREVIEWABLE = /\.(png|jpe?g|webp|gif)$/i;
 
@@ -13,6 +18,9 @@ export default function App() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [image, setImage] = useState<SelectedFile | null>(null);
   const [boundary, setBoundary] = useState<File | null>(null);
+  const [boundaryPreview, setBoundaryPreview] = useState<BoundaryPreview | null>(null);
+  const [boundaryError, setBoundaryError] = useState<string | null>(null);
+  const [boundaryLoading, setBoundaryLoading] = useState(false);
   const [settings, setSettings] = useState<DetectionSettings>({
     confidenceThreshold: 0.3,
     minCrownAreaM2: 1,
@@ -70,6 +78,38 @@ export default function App() {
     };
   }, [image]);
 
+  // Parse the boundary as soon as it is dropped, not at analysis time. A KML
+  // for the wrong site is a mistake best discovered from the map immediately,
+  // and the file has to reach the server to be measured correctly anyway.
+  useEffect(() => {
+    if (!boundary) {
+      setBoundaryPreview(null);
+      setBoundaryError(null);
+      setBoundaryLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setBoundaryLoading(true);
+    setBoundaryError(null);
+    previewBoundary(boundary, controller.signal)
+      .then((preview) => {
+        setBoundaryPreview(preview);
+        setBoundaryLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setBoundaryPreview(null);
+        setBoundaryLoading(false);
+        // The server's own explanation names what is wrong with the file; a
+        // generic "could not read boundary" would tell the user nothing they
+        // could act on.
+        setBoundaryError(
+          error instanceof ApiError ? error.message : "The boundary file could not be read.",
+        );
+      });
+    return () => controller.abort();
+  }, [boundary]);
+
   const availableEngines = useMemo(
     () => capabilities?.engines.filter((engine) => engine.available) ?? [],
     [capabilities],
@@ -79,6 +119,9 @@ export default function App() {
     if (apiError) return "The backend is not reachable, so no analysis can be run.";
     if (!capabilities) return "Waiting for the backend to report its capabilities…";
     if (!image) return "Upload imagery to enable analysis.";
+    if (boundary && boundaryLoading) return "Reading the boundary file…";
+    if (boundary && boundaryError)
+      return "The boundary file could not be read, so the analysis it would restrict cannot be set up.";
     if (availableEngines.length === 0) {
       const reasons = capabilities.engines
         .map((engine) => engine.reason)
@@ -87,7 +130,7 @@ export default function App() {
       return `No detection engine is available on this server, so no results can be produced. ${reasons}`.trim();
     }
     return null;
-  }, [apiError, availableEngines.length, capabilities, image]);
+  }, [apiError, availableEngines.length, boundary, boundaryError, boundaryLoading, capabilities, image]);
 
   const handleRun = useCallback(() => {
     // Detection is wired up in the analysis phase; the button stays disabled
@@ -102,6 +145,9 @@ export default function App() {
           capabilities={capabilities}
           imageFile={image?.file ?? null}
           boundaryFile={boundary}
+          boundaryPreview={boundaryPreview}
+          boundaryError={boundaryError}
+          boundaryLoading={boundaryLoading}
           settings={settings}
           onImageSelect={handleImageSelect}
           onBoundarySelect={setBoundary}
@@ -110,8 +156,13 @@ export default function App() {
           runBlockedReason={runBlockedReason}
           running={false}
         />
-        <MapView image={image} />
-        <ResultsPanel capabilities={capabilities} apiError={apiError} />
+        <MapView
+          image={image}
+          boundary={boundaryPreview}
+          boundaryError={boundaryError}
+          boundaryLoading={boundaryLoading}
+        />
+        <ResultsPanel capabilities={capabilities} apiError={apiError} boundary={boundaryPreview} />
       </div>
     </div>
   );

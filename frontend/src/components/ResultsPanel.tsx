@@ -1,25 +1,36 @@
-import type { Capabilities } from "../types";
+import { formatArea } from "../lib/format";
+import type { BoundaryPreview, Capabilities } from "../types";
 import { Limitations } from "./Limitations";
 
 interface Props {
   capabilities: Capabilities | null;
   apiError: string | null;
+  boundary: BoundaryPreview | null;
 }
 
-const METRICS = [
-  "Trees detected",
-  "Total canopy area",
-  "Analyzed area",
-  "Canopy coverage",
-  "Average crown area",
-  "Median crown area",
+/**
+ * Three of these are areas and they mean different things, so each is labelled
+ * with what it measures rather than left to be inferred:
+ *
+ * - Analyzed area: the ground examined, and the denominator of coverage.
+ * - Detected crown area: the ground under crowns inside it.
+ * - Boundary area: what the uploaded KML encloses — reported in its own
+ *   section, because it comes from the file rather than from a detection.
+ */
+const METRICS: { label: string; note?: string }[] = [
+  { label: "Trees detected" },
+  { label: "Detected crown area", note: "Ground covered by crowns" },
+  { label: "Analyzed area", note: "Ground examined, nodata excluded" },
+  { label: "Canopy coverage", note: "Crown area ÷ analyzed area" },
+  { label: "Average crown area" },
+  { label: "Median crown area" },
 ];
 
 /**
  * Results surface. Until a real analysis has run it shows an empty state —
  * never sample numbers, because a metric on screen implies a measurement.
  */
-export function ResultsPanel({ capabilities, apiError }: Props) {
+export function ResultsPanel({ capabilities, apiError, boundary }: Props) {
   return (
     <aside className="flex w-full shrink-0 flex-col overflow-y-auto border-line bg-surface-1 lg:w-[320px] lg:border-l">
       <section className="border-b border-line p-4 lg:p-5">
@@ -28,10 +39,15 @@ export function ResultsPanel({ capabilities, apiError }: Props) {
         <dl className="mt-4 flex flex-col">
           {METRICS.map((metric) => (
             <div
-              key={metric}
-              className="flex items-baseline justify-between border-b border-line/60 py-2 last:border-b-0"
+              key={metric.label}
+              className="flex items-baseline justify-between gap-3 border-b border-line/60 py-2 last:border-b-0"
             >
-              <dt className="text-[13px] text-ink-muted">{metric}</dt>
+              <dt className="text-[13px] text-ink-muted">
+                {metric.label}
+                {metric.note && (
+                  <span className="block text-[11px] text-ink-faint">{metric.note}</span>
+                )}
+              </dt>
               <dd className="tabular font-mono text-[13px] text-ink-faint">—</dd>
             </div>
           ))}
@@ -52,6 +68,32 @@ export function ResultsPanel({ capabilities, apiError }: Props) {
           </button>
         </div>
       </section>
+
+      {boundary && (
+        <section className="border-b border-line p-4 lg:p-5">
+          <span className="label">Boundary</span>
+          <dl className="mt-4 flex flex-col">
+            <div className="flex items-baseline justify-between gap-3 border-b border-line/60 py-2">
+              <dt className="text-[13px] text-ink-muted">
+                Boundary area
+                <span className="block text-[11px] text-ink-faint">Ground the file encloses</span>
+              </dt>
+              <dd className="tabular font-mono text-[13px] text-ink">
+                {formatArea(boundary.area_m2)}
+              </dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-3 py-2">
+              <dt className="text-[13px] text-ink-muted">Separate areas</dt>
+              <dd className="tabular font-mono text-[13px] text-ink">{boundary.part_count}</dd>
+            </div>
+          </dl>
+          <p className="mt-2 text-[12px] leading-relaxed text-ink-faint">
+            Read from {boundary.source_format} in {boundary.source_crs} and measured in{" "}
+            {boundary.measurement_crs}. This is what the boundary encloses, not what the imagery
+            covers — the analyzed area will be smaller wherever the image stops short of it.
+          </p>
+        </section>
+      )}
 
       <Limitations />
 
