@@ -16,7 +16,7 @@ from . import __version__
 from .config import get_settings
 from .errors import register_error_handlers
 from .logging_config import configure_logging
-from .routers import health
+from .routers import boundary, health
 
 log = logging.getLogger("canopylens")
 
@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
     )
     register_error_handlers(app)
     app.include_router(health.router, prefix="/api")
+    app.include_router(boundary.router, prefix="/api")
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:

@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # --- Storage ----------------------------------------------------------
     data_dir: Path = REPO_ROOT / "backend" / ".data"
     max_upload_mb: int = 512
+    # Boundaries are XML or JSON describing an outline; a few megabytes is
+    # already a very detailed one. A separate, much lower ceiling keeps a
+    # 512 MB imagery allowance from applying to a text file.
+    max_boundary_upload_mb: int = 32
 
     # --- Processing limits ------------------------------------------------
     tile_size: int = 800

@@ -36,6 +36,7 @@ class EngineStatus(BaseModel):
 
 class ProcessingLimits(BaseModel):
     max_upload_mb: int
+    max_boundary_upload_mb: int
     tile_size: int
     tile_overlap: int
     max_pixels_without_tiling: int
@@ -62,6 +63,42 @@ class CapabilitiesResponse(BaseModel):
     defaults: DetectionDefaults
     supported_raster_formats: list[str]
     supported_boundary_formats: list[str]
+
+
+class BoundaryPreviewResponse(BaseModel):
+    """A parsed boundary, ready to be drawn and measured.
+
+    Every field is derived from the uploaded file. `area_m2` is the ground the
+    boundary encloses, measured after reprojection into `measurement_crs` - it
+    is not the analysed area and not the canopy area, and the UI must not
+    present it as either.
+    """
+
+    geometry: dict = Field(
+        description="The boundary as a GeoJSON geometry in WGS84 (EPSG:4326)."
+    )
+    area_m2: float = Field(
+        description=(
+            "Ground enclosed by the boundary, holes excluded, in square metres. "
+            "Measured in a projected CRS - never from degrees."
+        )
+    )
+    area_hectares: float
+    part_count: int = Field(description="Number of separate areas the boundary describes.")
+    has_holes: bool
+    source_format: str = Field(description="KML, KMZ or GeoJSON.")
+    source_crs: str = Field(
+        description="The CRS the file was read in, before reprojection to WGS84."
+    )
+    measurement_crs: str = Field(description="The projected CRS the area was measured in.")
+    bounds_wgs84: list[float] = Field(
+        description="[min_lon, min_lat, max_lon, max_lat] for fitting a map view."
+    )
+    centroid_wgs84: list[float] = Field(description="[longitude, latitude] of the centroid.")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Anything the user should know about how this file was read.",
+    )
 
 
 class ErrorBody(BaseModel):

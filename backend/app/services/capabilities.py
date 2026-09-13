@@ -12,9 +12,12 @@ from ..schemas import (
     EngineStatus,
     ProcessingLimits,
 )
+from .boundary import SUPPORTED_EXTENSIONS as BOUNDARY_EXTENSIONS
 
 SUPPORTED_RASTER_FORMATS = [".tif", ".tiff", ".geotiff", ".png", ".jpg", ".jpeg"]
-SUPPORTED_BOUNDARY_FORMATS = [".kml", ".kmz", ".geojson", ".json"]
+# Read from the loader that actually accepts them, so the list the UI shows
+# and the list the parser enforces cannot drift apart.
+SUPPORTED_BOUNDARY_FORMATS = sorted(BOUNDARY_EXTENSIONS)
 
 
 def build_capabilities(settings: Settings, version: str) -> CapabilitiesResponse:
@@ -43,6 +46,7 @@ def build_capabilities(settings: Settings, version: str) -> CapabilitiesResponse
             tile_size=settings.tile_size,
             tile_overlap=settings.tile_overlap,
             max_pixels_without_tiling=settings.max_pixels_without_tiling,
+            max_boundary_upload_mb=settings.max_boundary_upload_mb,
         ),
         defaults=DetectionDefaults(
             confidence_threshold=settings.default_confidence,
