@@ -1,4 +1,15 @@
-const LIMITATIONS = [
+/**
+ * The standing limits of the method.
+ *
+ * Every analysis response carries its own copy of this list, and that copy is
+ * authoritative — it is the one that travels with the numbers into a CSV or a
+ * report. The list below is what is shown before any analysis has run, when
+ * there is no response to take it from, and mirrors `backend/app/limitations.py`.
+ */
+const FALLBACK_NOTICE =
+  "Results are model estimates, not measurements. Treat crown counts and areas as approximate, and verify before using them for any decision that matters.";
+
+const FALLBACK_ITEMS = [
   "Overlapping and touching crowns in closed canopy are frequently merged or split incorrectly.",
   "Dense forest, deep shadow and steep terrain reduce accuracy substantially.",
   "Imagery coarser than roughly 0.5 m per pixel cannot resolve individual small crowns.",
@@ -10,16 +21,23 @@ const LIMITATIONS = [
   "No ground-truth validation is performed. Nothing here is a field-verified tree inventory.",
 ];
 
-export function Limitations() {
+interface Props {
+  /** From the analysis response, when one exists. */
+  items?: string[];
+  notice?: string;
+}
+
+export function Limitations({ items, notice }: Props) {
+  const list = items?.length ? items : FALLBACK_ITEMS;
+
   return (
-    <section className="border-t border-line p-4 lg:p-5">
-      <span className="label">Limitations</span>
+    <section className="border-b border-line p-4 lg:p-5">
+      <h2 className="label">Limitations</h2>
       <p className="mt-3 text-[12px] leading-relaxed text-ink-muted">
-        Results are <span className="text-ink">model estimates</span>, not measurements. Treat crown
-        counts and areas as approximate, and verify before using them for any decision that matters.
+        {notice ?? FALLBACK_NOTICE}
       </p>
       <ul className="mt-3 flex flex-col gap-2">
-        {LIMITATIONS.map((item) => (
+        {list.map((item) => (
           <li key={item} className="flex gap-2 text-[12px] leading-relaxed text-ink-faint">
             <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-line-strong" aria-hidden />
             {item}
