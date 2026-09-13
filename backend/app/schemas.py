@@ -25,6 +25,13 @@ class EngineStatus(BaseModel):
     reason: str | None = None
     produces: str
     requires_download: bool
+    confidence_kind: str = Field(
+        description=(
+            "How this engine's confidence should be read: 'model' is a score "
+            "from a trained detector, 'heuristic' is a rule-based plausibility "
+            "score. The two must not be presented to the user as the same thing."
+        )
+    )
 
 
 class ProcessingLimits(BaseModel):

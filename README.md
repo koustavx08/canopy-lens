@@ -11,34 +11,137 @@ the result.
 
 ## Project status
 
-**The foundation is complete and runs. The detection pipeline is not implemented
-yet.**
+**The detection pipeline is implemented and tested. It is not yet wired to the
+HTTP API or the user interface.**
 
 | Area | State |
 | --- | --- |
 | Backend service, config, typed errors, capability reporting | Working |
-| `canopylens_ml` package, engine registry, dependency probing | Working |
-| Frontend shell: upload, settings, map/imagery preview, results layout, limitations | Working |
-| Docker images, compose stack, dev scripts, tests | Working |
-| Detection engines, tiling, georeferencing, boundary clipping, export | **Not built yet** |
+| Detection engines: classical CV baseline, DeepForest | Working |
+| Raster reading, tiling, overlap deduplication | Working |
+| CRS handling, reprojection, area in m2, KML/KMZ/GeoJSON clipping | Working |
+| `analyze_image()`, `export_csv()`, `export_geojson()` | Working |
+| Test suite (244 tests) | Passing |
+| HTTP upload / analysis / export endpoints | **Not built yet** |
+| Frontend wired to real results, crown rendering, click-to-inspect | **Not built yet** |
 
-Because no engine is registered yet, **Run analysis is disabled** and says why.
-No part of the UI shows an invented tree count, area, or coverage figure to fill
-that gap — metrics read `—` until a real analysis produces them.
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#not-built-yet) for the full list
-of what remains.
+The pipeline can be driven directly today:
+
+```python
+from app.services.analysis import analyze_image
+from app.services.export import export_csv, export_geojson
+
+result = analyze_image(
+    "scene.tif",
+    boundary_path="stand.kml",       # optional
+    confidence_threshold=0.30,
+    min_crown_area_m2=1.0,
+    engine="auto",
+)
+print(result.summary.tree_count, result.summary.canopy_coverage_pct)
+```
+
+Until the endpoints exist, **Run analysis in the browser is still disabled and
+says why**. No part of the UI shows an invented tree count, area or coverage
+figure to fill that gap - metrics read as an em dash until a real analysis
+produces them.
 
 ---
 
-## What it will do
+## What it does
 
-- Detect individual tree crowns in uploaded imagery and count them
-- Draw each crown as a clickable polygon over the imagery
-- Report per-crown area, total canopy area, analysed area, and canopy coverage %
-- Report a confidence value per crown and a confidence distribution overall
-- Clip detections to an uploaded KML/KMZ boundary
-- Export results as CSV and GeoJSON
-- Say clearly when the imagery cannot support a physical-area estimate
+- Detects individual tree crowns in imagery and counts them
+- Reports per-crown area, total canopy area, analysed area and canopy coverage %
+- Reports a confidence value per crown, labelled with what kind of score it is
+- Clips detections to a KML/KMZ/GeoJSON boundary
+- Exports results as CSV and GeoJSON
+- Says clearly when the imagery cannot support a physical-area estimate
+
+Still to come: the HTTP endpoints and the browser interface that put the above
+in front of a user - crown polygons on the map, click-to-inspect, download
+buttons.
+
+---
+
+## How detection works
+
+### The models
+
+| Engine | What it is | Confidence | Needs |
+| --- | --- | --- | --- |
+| `classical` | Excess Green vegetation index, then a distance-transform watershed to separate touching crowns | **Heuristic** plausibility score from greenness, circularity and solidity | Core requirements only |
+| `deepforest` | [DeepForest](https://deepforest.readthedocs.io/) - a RetinaNet pretrained on hand-annotated NEON airborne RGB imagery of North American forests | **Model** score from the trained detector | Optional `requirements-ml.txt` (~2.5 GB) |
+
+`engine="auto"` uses DeepForest when it is genuinely installed and working, and
+falls back to the classical engine otherwise. If neither can run, the pipeline
+raises `engine_unavailable` - it never substitutes fabricated detections.
+
+The two confidence values are **not the same kind of number**, and the API says
+which is which in `confidence_kind`. The classical engine has no trained
+weights, so its score is a documented ranking heuristic, not a calibrated
+probability. It is used for thresholding and for choosing a winner during
+deduplication, both of which need only a consistent ordering.
+
+DeepForest predicts bounding *boxes*. A box overstates canopy area by roughly a
+quarter - a circle inscribed in a square covers pi/4 of it - so each box is
+refined into a crown outline by thresholding the vegetation index inside it.
+Boxes that cannot be refined keep their rectangle and are flagged, so the
+overestimate is visible rather than hidden.
+
+### The processing workflow
+
+1. **Open the raster** with rasterio, preserving CRS, transform and nodata.
+   Fewer than three bands is refused: crowns are found from the relationship
+   between red, green and blue, which one band cannot express.
+2. **Choose the measurement CRS** once, from the raster's own footprint. A UTM
+   zone for a normal scene; a local equal-area projection when the extent is
+   too wide for a single zone. A source CRS already projected in metres is kept
+   as it is.
+3. **Convert the minimum-crown-area setting from m2 into pixels**, by projecting
+   one actual pixel and measuring it. This is the only place the user's metric
+   units meet the engines' pixel units before detection.
+4. **Tile**, if the raster exceeds `MAX_PIXELS_WITHOUT_TILING` (4 MP). Tiles are
+   800 px with 160 px (20%) overlap, read window by window, so the full raster
+   is never loaded into memory. Edge tiles are shifted back inside the raster
+   rather than truncated.
+5. **Detect per tile**, then offset each tile's local coordinates into the
+   full-raster pixel grid.
+6. **Deduplicate.** Overlap means a crown on a seam is found by both
+   neighbours. Non-maximum suppression on polygon IoU, plus a containment rule
+   for the case where one detection sits inside a larger merged blob, keeps the
+   highest-confidence polygon per cluster.
+7. **Filter** by confidence, then by minimum area.
+8. **Georeference and measure.** Pixel polygons go through the affine transform
+   into the raster CRS, then into the measurement CRS, where area is taken.
+   Invalid rings are repaired first; anything unrepairable is dropped rather
+   than contributing a meaningless area.
+9. **Clip to the boundary**, if one was supplied. The KML polygon is reprojected
+   *into the raster CRS* - the imagery is never resampled - and crowns whose
+   centroid falls outside it are excluded. The analysed area becomes the
+   clipped region, so coverage stays honest.
+10. **Summarise**: count, total canopy area, analysed area, coverage %, mean and
+    median crown area, and a confidence distribution.
+
+### How the numbers are defined
+
+- **Total canopy area** is the area of the **union** of crown polygons clipped
+  to the analysed region, not the sum of crown areas. Overlapping crowns cover
+  one patch of ground, and summing would let coverage exceed 100%. The sum is
+  reported separately as `sum_crown_area_m2`, since that is what adding up the
+  CSV's area column gives.
+- **Analysed area** is the imagery footprint, clipped to any boundary, with
+  nodata excluded. A mosaic clipped to an irregular shape is stored in a
+  rectangular file with blank corners, and counting those as analysed ground
+  would understate coverage.
+- **Area is never computed from degrees.** Latitude and longitude are angles;
+  `shapely.area` on a WGS84 polygon returns square degrees. Every area is
+  measured after reprojecting into a projected, metre-based CRS. Web Mercator
+  is deliberately not used - it is conformal, not equal-area, and inflates area
+  by 1/cos^2(latitude).
+- **Imagery without georeferencing still works**, but every square-metre field
+  is empty rather than guessed. Pixel areas are reported because they are true
+  regardless of metadata, coverage is computed in pixel space, and the result
+  carries a warning saying exactly why no areas are available.
 
 ---
 
@@ -103,6 +206,16 @@ Optional deep-learning engine:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r backend/requirements-ml.txt
 ```
+
+`requirements-ml.txt` pins `albumentations<2.0`. DeepForest 1.5 imports
+`albumentations.functional`, which albumentations 2.x removed; without the pin
+the package installs cleanly and then fails on first use. The DeepForest
+engine's availability check imports `deepforest.main` rather than the bare
+package precisely so that this class of breakage is reported as "engine
+unavailable, here is why" instead of crashing mid-analysis.
+
+The pretrained weights (~130 MB) download from Hugging Face on first use and
+are cached, so the first DeepForest run needs network access.
 
 ---
 
@@ -271,6 +384,19 @@ displayed in the app itself, not buried here:
 - **Domain shift**: pretrained crown models were trained on specific regions,
   sensors, and seasons. Accuracy on imagery unlike that training data is
   unknown, not merely lower.
+- **Confidence means different things per engine.** The classical engine's
+  score is a rule-based plausibility ranking from greenness, circularity and
+  solidity - useful for ordering and thresholding, but not a probability that a
+  tree is there. Only DeepForest's score comes from a trained detector. The API
+  reports which kind you are looking at in `confidence_kind`; do not compare
+  the two as if they were the same scale.
+- **The classical engine is a baseline, not a peer of the trained model.** It
+  exists so the application always has a working path. In closed canopy it
+  merges neighbouring crowns more readily than DeepForest does.
+- **Crown area is the segmented foliage outline**, which is smaller than the
+  true crown wherever foliage is in deep shadow or occluded by a neighbour.
+  Measured against synthetic circles the segmentation runs a few per cent
+  under the true area.
 - **No ground-truth validation is performed.** Nothing this tool outputs is a
   field-verified tree inventory, and it should not be presented as one.
 
@@ -282,17 +408,20 @@ such rather than a square-metre value that looks authoritative and is not.
 
 ## Roadmap
 
-1. **Detection engines** — classical CV baseline (vegetation index + watershed)
-   registered first so the app always has a working path; DeepForest added as
-   the higher-quality optional engine.
-2. **Raster pipeline** — windowed reading, overlapping tiles, NMS deduplication
-   at tile boundaries.
-3. **Geospatial layer** — CRS preservation, KML/KMZ parsing and reprojection
-   into the raster CRS, boundary clipping, area via a projected CRS.
-4. **Results and interaction** — crown polygons on the map, click-to-inspect
+1. ~~**Detection engines**~~ - classical CV baseline and DeepForest, both
+   registered and reporting their availability honestly. **Done.**
+2. ~~**Raster pipeline**~~ - windowed reading, overlapping tiles, NMS
+   deduplication at tile boundaries. **Done.**
+3. ~~**Geospatial layer**~~ - CRS preservation, KML/KMZ parsing and
+   reprojection into the raster CRS, boundary clipping, area via a projected
+   CRS. **Done.**
+4. ~~**Export**~~ - `export_csv()` and `export_geojson()` generated from the
+   real analysis. **Done.**
+5. **HTTP endpoints** - upload, analysis, progress reporting and download,
+   mapping the pipeline's typed errors onto the existing error codes.
+6. **Results and interaction** - crown polygons on the map, click-to-inspect
    (Crown ID, confidence, area, centroid), the full metrics panel.
-5. **Export** — CSV and GeoJSON downloads generated from the real analysis.
-6. **Deployment** — frontend on Vercel, backend on Render or Fly.
+7. **Deployment** - frontend on Vercel, backend on Render or Fly.
 
 ---
 

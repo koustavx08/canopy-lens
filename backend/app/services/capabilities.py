@@ -34,6 +34,7 @@ def build_capabilities(settings: Settings, version: str) -> CapabilitiesResponse
                 reason=e.reason,
                 produces=e.produces,
                 requires_download=e.requires_download,
+                confidence_kind=e.confidence_kind,
             )
             for e in available_engines()
         ],

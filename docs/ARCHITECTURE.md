@@ -3,10 +3,10 @@
 This document describes how the system is put together, why it is split the way
 it is, and which parts are deliberately not built yet.
 
-> **Status: foundation phase complete.** The shells, contracts, configuration,
-> and infrastructure described here exist and run. The detection pipeline
-> (tiling, engines, georeferencing, boundary clipping, export) is scaffolded
-> with real interfaces but has no engine implementations yet — see
+> **Status: detection pipeline complete.** Engines, tiling, deduplication,
+> CRS handling, boundary clipping, area measurement and export are implemented
+> and covered by 244 tests. What remains is the HTTP layer that exposes them
+> and the frontend wiring that displays them — see
 > [Not built yet](#not-built-yet). Nothing in the UI currently fabricates a
 > result to stand in for that gap; controls that cannot do real work are
 > disabled with the reason shown.
@@ -102,47 +102,76 @@ be invented. That is enforced structurally, not by convention:
   `missing_georeference` and the UI reports pixel-based figures labelled as
   such, instead of printing a plausible-looking m² value.
 
-## Detection pipeline (design)
+## Detection pipeline
 
-The interfaces exist; the engines are the next phase.
+Implemented across `backend/app/services/` and `ml/canopylens_ml/`. The entry
+point is `analysis.analyze_image()`.
 
-1. **Open the raster** with rasterio, preserving CRS, transform, and nodata.
-2. **Decide tiling.** Rasters under `CANOPYLENS_MAX_PIXELS_WITHOUT_TILING`
-   (default 4 MP) are processed whole. Larger ones are read window-by-window at
-   `CANOPYLENS_TILE_SIZE` (800 px) with `CANOPYLENS_TILE_OVERLAP` (160 px, 20%)
-   between neighbours. The full raster is never loaded into memory.
-3. **Detect per tile.** The engine receives an RGB array and returns
-   `CrownDetection` objects with polygons in tile-local pixel coordinates.
-4. **Offset to raster space.** Tile-local coordinates are shifted by the window
-   origin.
-5. **Deduplicate.** A crown straddling a tile edge is found by both neighbours.
-   Spatial non-maximum suppression over the overlap region keeps the
-   highest-confidence polygon per cluster, using the IoU threshold in
-   `DetectionParams`.
-6. **Georeference.** Pixel polygons go through the raster's affine transform
-   into the raster CRS.
-7. **Clip to the boundary, if one was uploaded.** The KML/KMZ polygon is
-   reprojected *into the raster CRS*, and detections whose centroid falls
-   outside it are dropped. The analysed area becomes the boundary area, not the
-   raster footprint — so canopy coverage stays honest.
-8. **Measure.** Geometries are reprojected to an appropriate equal-area or local
-   projected CRS before any area is computed.
-9. **Serialise** to GeoJSON (WGS84) and CSV.
+| Step | Module | What it does |
+| --- | --- | --- |
+| 1. Open | `services/raster.py` | rasterio open, preserving CRS, transform and nodata. Fewer than three bands is refused |
+| 2. Measurement CRS | `services/geo.py` | UTM zone for a normal scene, local equal-area for a wide extent, source CRS kept if already metric |
+| 3. Threshold conversion | `services/geo.py` | The m2 minimum becomes pixels by projecting one real pixel |
+| 4. Tile | `services/raster.py` | 800 px windows, 160 px overlap, above 4 MP. Edge tiles shift inward rather than truncate |
+| 5. Detect | `canopylens_ml/engines/` | Engine returns polygons in tile-local pixel coordinates |
+| 6. Offset | `canopylens_ml/geometry.py` | translate() lifts tile coordinates into the full raster grid |
+| 7. Deduplicate | `services/dedup.py` | IoU non-maximum suppression plus a containment rule, over an R-tree |
+| 8. Filter | `services/analysis.py` | Confidence, then minimum area |
+| 9. Georeference and measure | `services/geo.py` | Affine to raster CRS, reproject to metric CRS, repair, measure |
+| 10. Clip | `services/boundary.py` | Boundary reprojected into the raster CRS; crowns outside it are excluded |
+| 11. Summarise | `services/analysis.py` | Counts, areas, coverage, statistics, confidence distribution |
+| 12. Export | `services/export.py` | CSV and GeoJSON |
+
+### Why deduplication needs more than IoU
+
+A crown straddling a tile seam is found by both neighbours, so overlap
+necessarily produces duplicates: without suppression a large raster overcounts
+along every seam.
+
+IoU alone is not enough. When one tile merges two neighbouring crowns into a
+single blob and the other resolves one of them cleanly, the small polygon sits
+almost entirely inside the large one but scores an IoU around 0.2 — below any
+sensible threshold — while plainly being the same tree twice. The containment
+rule measures the intersection against the *smaller* polygon's area and catches
+exactly that case.
+
+### Why area is the union, not the sum
+
+Overlapping crowns cover one patch of ground. Summing their areas double-counts
+the overlap and lets coverage exceed 100%. `total_canopy_area_m2` is therefore
+the area of the union of crown polygons, clipped to the analysed region.
+`sum_crown_area_m2` is reported alongside it because that is the figure a user
+gets by adding up the CSV's area column, and the two differing is expected
+rather than a bug.
 
 ### Engine strategy
 
-| Engine | Role | Dependency |
-| --- | --- | --- |
-| Classical CV (vegetation index + watershed segmentation) | Always-available baseline | Core requirements only |
-| DeepForest (pretrained RetinaNet, boxes refined to crown polygons) | Higher-quality default when installed | Optional `requirements-ml.txt` |
+| Engine | Role | Confidence | Dependency |
+| --- | --- | --- | --- |
+| `classical` — Excess Green index + distance-transform watershed | Always-available baseline | Heuristic: greenness, circularity, solidity | Core requirements only |
+| `deepforest` — pretrained RetinaNet, boxes refined to crown polygons | Higher-quality default when installed | Model score from the trained detector | Optional `requirements-ml.txt` |
+
+`EngineInfo.confidence_kind` carries "heuristic" or "model" all the way to the
+browser. The distinction is not cosmetic: presenting a rule-based ranking as
+though it were a detector's probability would be exactly the kind of
+plausible-looking falsehood this project is built to avoid.
 
 `detectron2` and `detectree2` were evaluated and rejected: they need a compile
 step that fails routinely on Windows and on slim container images. A reliable
 engine that runs everywhere beats a better engine that does not install.
 
 `CANOPYLENS_DEFAULT_ENGINE=auto` picks the best engine that reports itself
-available. If none does, the API returns `engine_unavailable` — it does not fall
-back to inventing detections.
+available. If none does, the API returns `engine_unavailable` — it does not
+fall back to inventing detections.
+
+### Availability must be probed, not declared
+
+`DeepForestEngine.check()` imports `deepforest.main`, not the bare `deepforest`
+package. During development the shallow check passed while the engine then
+crashed on use, because DeepForest 1.5 imports `albumentations.functional` and
+albumentations 2.x had removed it. An availability check that does not exercise
+the real entry point is a claim, not a check; the version ceiling is now pinned
+and the probe goes deep enough to catch the next one.
 
 ## Frontend structure
 
@@ -198,16 +227,39 @@ Tests assert *truthfulness*, not just status codes — for example,
 `/api/capabilities` against `importlib.metadata.version()` for the same
 distribution, so a capabilities endpoint that starts lying fails the suite.
 
+The geospatial tests work on synthetic scenes whose truth is arithmetic: crowns
+are circles of known radius at known pixel positions on rasters of known pixel
+size, so a count or an area is checked against what the geometry says it must
+be rather than against previously recorded output. A test that only pins
+current behaviour cannot tell you the behaviour is correct.
+
+`tests/geo/test_area.py` attacks the degrees trap directly. The same ground
+expressed in UTM and in WGS84 must measure the same; a one-degree box at 60
+degrees north must measure far less ground than one at the equator despite
+being identical in degrees; and the naive square-degrees answer is asserted to
+be wrong by nine orders of magnitude, so a regression reads as an obvious
+failure rather than as a plausible number.
+
+| Area | File |
+| --- | --- |
+| CRS selection, UTM zones, reprojection | `tests/geo/test_crs.py` |
+| Area measurement, the degrees trap, geometry repair | `tests/geo/test_area.py` |
+| KML/KMZ/GeoJSON parsing and clipping | `tests/geo/test_boundary.py` |
+| Duplicate removal | `tests/geo/test_dedup.py` |
+| Raster metadata, tiling windows, dtype handling | `tests/geo/test_raster.py` |
+| End-to-end analysis, filtering, summary statistics | `tests/pipeline/test_analysis.py` |
+| CSV and GeoJSON export | `tests/pipeline/test_export.py` |
+| Engines, registry, pixel-space primitives | `tests/ml/` |
+
 ## Not built yet
 
 Listed so the gap is explicit rather than discovered:
 
-- Detection engine implementations (`ml/canopylens_ml/engines/` registers no
-  engines yet; `_LAZY_ENGINES` is empty)
-- Upload, analysis, and export endpoints
-- Raster reading, tiling, and NMS deduplication
-- KML/KMZ parsing and boundary clipping
-- Area computation and the CRS-selection logic
-- Crown polygon rendering and click-to-inspect in the map
-- CSV and GeoJSON download generation
+- HTTP endpoints for upload, analysis and export. The pipeline is callable as
+  `analyze_image()` / `export_csv()` / `export_geojson()`, but nothing serves it
+  over the network yet
 - Progress reporting for long-running analyses
+- Crown polygon rendering and click-to-inspect in the map
+- Frontend wiring to real results; the UI still shows em dashes and a disabled
+  Run control with its reason
+- Deployment configuration for a hosted environment

@@ -14,6 +14,12 @@ export interface EngineStatus {
   reason: string | null;
   produces: "polygon" | "bbox" | string;
   requires_download: boolean;
+  /**
+   * How to present this engine's confidence. A "heuristic" score ranks
+   * candidates by shape and colour; it is not a probability and must not be
+   * labelled as one. "model" is a score from a trained detector.
+   */
+  confidence_kind: "model" | "heuristic" | string;
 }
 
 export interface ProcessingLimits {
