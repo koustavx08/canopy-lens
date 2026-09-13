@@ -3,15 +3,15 @@
 This document describes how the system is put together, why it is split the way
 it is, and which parts are deliberately not built yet.
 
-> **Status: detection pipeline and boundary workflow complete.** Engines,
-> tiling, deduplication, CRS handling, boundary parsing and measurement,
-> clipping, area measurement and export are implemented and covered by 341
-> tests. Boundaries run end to end: `POST /api/boundary/preview` parses and
-> measures one, and the map draws it. What remains is the analysis endpoint and
-> the crown rendering that depends on it — see
-> [Not built yet](#not-built-yet). Nothing in the UI currently fabricates a
-> result to stand in for that gap; controls that cannot do real work are
-> disabled with the reason shown.
+> **Status: backend complete.** Engines, tiling, deduplication, CRS handling,
+> boundary parsing and measurement, clipping, area measurement, export, and the
+> HTTP layer that serves all of it are implemented and covered by 404 tests.
+> Imagery goes in over `POST /api/analyze`, progress comes back from
+> `GET /api/jobs/{id}`, and the measured result and both downloads come back
+> from `GET /api/results/{id}`. What remains is the browser interface that puts
+> it in front of a user — see [Not built yet](#not-built-yet). Nothing in the UI
+> currently fabricates a result to stand in for that gap; controls that cannot
+> do real work are disabled with the reason shown.
 
 ## Shape of the system
 
@@ -57,6 +57,7 @@ backend/app/
   routers/            HTTP layer: parse, validate, delegate, serialise
     health.py         liveness and capability reporting
     boundary.py       boundary upload, parsing and measurement
+    analysis.py       submit, poll, collect; the job endpoints
   services/           domain logic; no FastAPI imports
     raster.py         rasterio reading, tiling, dtype normalisation
     geo.py            CRS selection, reprojection, area in m2 — the only place
@@ -66,7 +67,10 @@ backend/app/
     analysis.py       the orchestrator: analyze_image()
     export.py         CSV and GeoJSON
     uploads.py        streamed, size-limited receipt of uploaded files
+    jobs.py           the in-memory job register
+    results.py        AnalysisResult -> the JSON the API returns
     capabilities.py   what this process can actually do, read from the process
+  limitations.py      the standing limits of the method, in one place
 ```
 
 Routers do no domain work and services do no HTTP work. A service raises a
@@ -89,8 +93,18 @@ of `message`, so error text can be reworded without breaking the client.
 | `invalid_boundary` | 422 | KML/KMZ/GeoJSON cannot be parsed into a usable geometry |
 | `engine_unavailable` | 503 | No detection engine can actually run in this process |
 | `payload_too_large` | 413 | Upload exceeds `CANOPYLENS_MAX_UPLOAD_MB`, or `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` for a boundary file |
-| `not_found` | 404 | A referenced analysis or upload does not exist |
-| `invalid_request` | 422 | Request-body validation failed |
+| `not_found` | 404 | A referenced job, analysis or upload does not exist |
+| `invalid_request` | 422 | Request-body validation failed; the message names the field |
+| `invalid_parameter` | 422 | A well-formed value naming something that does not exist, such as an unknown engine |
+| `job_not_finished` | 409 | A result was asked for before its analysis completed |
+| `analysis_failed` | 500 | The pipeline stopped unexpectedly; details are in the server log only |
+| `internal_error` | 500 | An unhandled bug. Never carries a stack trace |
+
+Two of those exist to keep three different kinds of "wrong value" apart:
+`invalid_request` is a number out of range, `invalid_parameter` is a name that
+does not exist, and `engine_unavailable` is a real engine that cannot run in
+this process. A client that wants to offer the right correction needs to tell
+them apart.
 
 ## The honesty contract
 
@@ -272,6 +286,110 @@ requires reprojection into a chosen projected CRS, and that is done in exactly
 one place; a number produced twice by two code paths is a number that will
 eventually disagree with itself.
 
+## The analysis endpoints
+
+`routers/analysis.py` owns three URLs, `services/jobs.py` owns the state behind
+them, and `services/results.py` owns the shape they answer in. The pipeline
+itself — `analyze_image` — still knows nothing about HTTP.
+
+### Why a job and not a response
+
+A large mosaic takes minutes. Holding the connection open for it is a bad
+bargain in three ways: the browser gets no progress, a reverse proxy may time
+out in the middle, and a dropped connection loses work that had nearly
+finished. `POST /api/analyze` validates, accepts, schedules and returns 202 with
+a job id; the client polls.
+
+Validation happens *before* anything is scheduled. An unsupported extension, an
+oversized file or an unknown engine is answered on the spot, rather than
+becoming a job that exists only to fail thirty seconds later.
+
+The work runs in FastAPI's background-task threadpool. That is enough for a
+single-process deployment and it is the honest ceiling: jobs live in one
+process's memory, so running several workers would scatter them. A second
+worker is the point at which the store moves to Redis, and nothing else has to
+change, because the router only ever talks to `JobStore`.
+
+### Why progress counts tiles
+
+`analyze_image` takes an optional `(stage, fraction)` callback and calls it once
+per tile. The fraction is tiles completed, mapped into the middle of the range,
+because detection is the only stage whose length depends on the image.
+
+What it is *not* is a timer. A progress bar driven by elapsed time tells the
+user how long they have waited, which they already know, and implies a
+completion estimate the server cannot compute. The cost of being honest is
+visible: a single-tile image jumps from 0.15 to 1.0 rather than sweeping. That
+is the real shape of the work.
+
+The callback's exceptions are caught and logged. A broken progress reporter is a
+reporting problem, and it must not be able to fail an analysis that has
+otherwise succeeded.
+
+### Why the store is a dictionary
+
+Results are useful for about as long as the tab that requested them is open. A
+database would mean retention rules, migrations and a cleanup story for data
+whose whole lifetime is a few minutes. So the store is an `OrderedDict` behind a
+`threading.Lock` — analyses run in worker threads while requests are served on
+the event loop, so every read and write takes the lock.
+
+It is bounded at 50 jobs, because an unbounded dictionary of analysis results is
+a memory leak with a polite name. Eviction only ever takes *finished* jobs,
+oldest first; if everything is still running the store goes over budget and logs
+it, since discarding work somebody is waiting for is the worse failure.
+
+`AnalysisResult` is kept as the object the pipeline produced. CSV and GeoJSON
+are rendered from it on request rather than written to disk, so there are no
+per-job files to clean up later.
+
+### Why a failed job answers like a synchronous call
+
+`JobError` records the failure's `code`, `message` **and** `status_code`. Asking
+for the result of a failed job re-raises it, so a boundary that would have
+returned `422 invalid_boundary` inline returns exactly that from
+`GET /api/results/{id}`. Flattening every background failure into one generic
+500 would throw away the only part the user can act on.
+
+Unexpected exceptions are the exception: they are logged in full and reported as
+`analysis_failed` with no internal detail, because a traceback tells the user
+nothing they can use and tells an attacker the library versions.
+
+### Why the result carries its own limitations
+
+The figure that gets pasted into a report is the one from the response, so the
+caveat travels with it rather than living only in this document.
+
+`limitations` and `warnings` are deliberately separate. `limitations` is the
+standing limits of the method, identical on every result and sourced from
+`app/limitations.py`. `warnings` is what was true of *this* image and *this*
+boundary — no georeferencing, imagery covering half the stand, a repaired
+polygon. Merging them would force the reader to work out which was which.
+
+### Why the result names the uploaded file
+
+An upload's own filename is never used as a path: only its extension survives,
+and the stored name is generated. That leaves a result identifying the imagery
+by a random hex string, which means nothing to the person who uploaded it. So
+`AnalysisResult.source_name` carries the display name separately, and it is what
+the result payload, the CSV provenance header and the GeoJSON metadata all
+report. The path on disk and the name in the report are two different things,
+and only one of them is safe to take from the client.
+
+### Upload safety
+
+| Concern | How it is handled |
+| --- | --- |
+| Oversized upload | Enforced on bytes read, not on `Content-Length`; the stream is abandoned mid-write and the partial file removed |
+| Imagery limit applied to a KML | Separate ceiling: `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` |
+| Path traversal via filename | The filename is never used as a path; the stored name is a UUID plus an allow-listed extension |
+| Path traversal via job id | Job ids index a dictionary, so a traversal attempt is a key that is not there — 404 |
+| A rejected boundary stranding the image | The image is removed before the rejection propagates |
+| Files accumulating | Uploads are deleted once the analysis has read them; results live in memory |
+| Arbitrary execution | Nothing uploaded is executed; imagery is opened by rasterio, boundaries parsed as XML or JSON |
+| Cross-origin abuse | CORS is an allow-list from `CANOPYLENS_CORS_ORIGINS`, never `*` |
+| Information disclosure | A catch-all handler returns a plain 500; the traceback goes to the log |
+
 ## Frontend structure
 
 ```
@@ -367,19 +485,21 @@ recorded from an earlier run.
 | CSV and GeoJSON export | `tests/pipeline/test_export.py` |
 | Health, capabilities, the boundary endpoint | `tests/backend/` |
 | Upload size limits and filename handling | `tests/backend/test_uploads.py` |
+| Submit/poll/collect, downloads, validation, CORS | `tests/backend/test_analysis_api.py` |
+| Job lifecycle, eviction, progress reporting | `tests/backend/test_jobs.py` |
+| The error envelope, and that 500s carry no traceback | `tests/backend/test_errors.py` |
 | Engines, registry, pixel-space primitives | `tests/ml/` |
 
 ## Not built yet
 
 Listed so the gap is explicit rather than discovered:
 
-- HTTP endpoints for imagery upload, analysis and export. The pipeline is
-  callable as `analyze_image()` / `export_csv()` / `export_geojson()`, but
-  nothing serves those over the network yet. `POST /api/boundary/preview` is
-  the one analysis-adjacent endpoint that does exist
-- Progress reporting for long-running analyses
 - Crown polygon rendering and click-to-inspect in the map
-- Frontend wiring to real detection results; the detection metrics still show
+- Frontend wiring to the analysis endpoints; the detection metrics still show
   em dashes and the Run control is disabled with its reason. Boundary figures
   are real, because they come from a real parse of a real file
+- A job store that survives a restart or a second worker. The current one is
+  in-process memory, bounded at 50 jobs, and says so in the 404 it returns for
+  an id it has forgotten
+- Cancelling a running analysis
 - Deployment configuration for a hosted environment

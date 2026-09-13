@@ -11,9 +11,9 @@ the result.
 
 ## Project status
 
-**The detection pipeline and the geospatial boundary workflow are implemented
-and tested. The analysis endpoint that joins them to the browser is not built
-yet.**
+**The backend is complete: imagery goes in over HTTP, measured crowns come
+back out, and both exports download. What remains is the browser interface that
+puts it in front of a user.**
 
 | Area | State |
 | --- | --- |
@@ -25,11 +25,25 @@ yet.**
 | `POST /api/boundary/preview` - parse, measure and return a boundary | Working |
 | Boundary drawn on the map, with its area, the moment it is dropped | Working |
 | `analyze_image()`, `export_csv()`, `export_geojson()` | Working |
-| Test suite (341 tests) | Passing |
-| HTTP upload / analysis / export endpoints | **Not built yet** |
+| `POST /api/analyze` - upload, validate, run, track | Working |
+| `GET /api/jobs/{id}` - status, stage, tile-based progress | Working |
+| `GET /api/results/{id}` and its CSV and GeoJSON downloads | Working |
+| Test suite (404 tests) | Passing |
 | Crown rendering and click-to-inspect in the map | **Not built yet** |
+| Frontend wired to the analysis endpoints | **Not built yet** |
 
-The pipeline can be driven directly today:
+The whole pipeline is reachable over HTTP:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/analyze \
+  -F image=@scene.tif -F boundary=@stand.kml
+# {"job_id":"fba1ea...","status":"queued","status_url":"/api/jobs/fba1ea...", ...}
+
+curl http://127.0.0.1:8000/api/jobs/fba1ea...      # progress while it runs
+curl http://127.0.0.1:8000/api/results/fba1ea...   # the measured result
+```
+
+It can equally be driven directly, with no server:
 
 ```python
 from app.services.analysis import analyze_image
@@ -45,14 +59,14 @@ result = analyze_image(
 print(result.summary.tree_count, result.summary.canopy_coverage_pct)
 ```
 
-Boundaries are already end-to-end: drop a KML, KMZ or GeoJSON into the browser
-and it is parsed server-side, drawn on the map, and reported with the area it
+Boundaries are end-to-end in the browser today: drop a KML, KMZ or GeoJSON and
+it is parsed server-side, drawn on the map, and reported with the area it
 encloses in square metres.
 
-Until the analysis endpoint exists, **Run analysis in the browser is still
-disabled and says why**. No part of the UI shows an invented tree count, area
-or coverage figure to fill that gap - detection metrics read as an em dash
-until a real analysis produces them.
+The detection metrics are not yet wired to the new endpoints, so **Run analysis
+in the browser is still disabled and says why**. No part of the UI shows an
+invented tree count, area or coverage figure to fill that gap - those metrics
+read as an em dash until a real analysis produces them.
 
 ---
 
@@ -67,8 +81,11 @@ until a real analysis produces them.
 - Exports results as CSV and GeoJSON
 - Says clearly when the imagery cannot support a physical-area estimate
 
-Still to come: the analysis endpoint and the parts of the interface that depend
-on it - crown polygons on the map, click-to-inspect, download buttons.
+- Runs the whole of that as a background job with real, pollable progress
+- Serves every figure above over HTTP, with CSV and GeoJSON downloads
+
+Still to come: the parts of the interface that depend on those endpoints -
+crown polygons on the map, click-to-inspect, download buttons.
 
 ---
 
@@ -435,12 +452,200 @@ check whether a file carries usable georeferencing.
 
 ## API
 
+Interactive documentation is at **`/docs`**, generated from the code, so the
+request and response shapes there are the ones the server actually enforces.
+
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/health` | Liveness: status, version, environment |
+| `GET /health` | Liveness: status, version, environment. Also at `/api/health`, because orchestrators look for it at the root |
 | `GET /api/capabilities` | What this running process can actually do: installed dependency versions, per-engine availability with reasons, processing limits, detection defaults, supported formats |
+| `POST /api/analyze` | Upload imagery and an optional boundary, start an analysis, get a job id |
+| `GET /api/jobs/{job_id}` | Status, stage and progress of that job |
+| `GET /api/results/{job_id}` | The measured result once the job has completed |
+| `GET /api/results/{job_id}/csv` | The crowns as CSV, as a browser download |
+| `GET /api/results/{job_id}/geojson` | The crowns as GeoJSON, as a browser download |
 | `POST /api/boundary/preview` | Parse a KML, KMZ or GeoJSON boundary and return it as WGS84 geometry plus its measured area |
 | `GET /docs` | Interactive OpenAPI documentation |
+
+### Running an analysis
+
+An analysis is not a request-shaped piece of work. A large mosaic takes
+minutes, during which a synchronous endpoint would give the browser no progress
+and a reverse proxy every excuse to time out and discard work that had nearly
+finished. So the flow is submit, poll, collect.
+
+**1. Submit.** `multipart/form-data`; `image` is required and everything else
+is optional.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/analyze \
+  -F image=@scene.tif \
+  -F boundary=@stand.kml \
+  -F confidence_threshold=0.30 \
+  -F min_crown_area_m2=1.0 \
+  -F engine=auto
+```
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `image` | file | required | `.tif`, `.tiff`, `.geotiff`, `.png`, `.jpg`, `.jpeg` |
+| `boundary` | file | none | `.kml`, `.kmz`, `.geojson`, `.json` |
+| `confidence_threshold` | float | `CANOPYLENS_DEFAULT_CONFIDENCE` | 0.0-1.0 |
+| `min_crown_area_m2` | float | `CANOPYLENS_DEFAULT_MIN_CROWN_AREA_M2` | 0-100000; ignored for imagery with no georeferencing, which has no square metres to measure |
+| `engine` | string | `CANOPYLENS_DEFAULT_ENGINE` | `auto`, or a name from `/api/capabilities` |
+
+`202 Accepted`, and nothing countable in it - at this point nothing has been
+counted:
+
+```json
+{
+  "job_id": "fba1ea9fda97493ba1587ac8672c9061",
+  "status": "queued",
+  "status_url": "/api/jobs/fba1ea9fda97493ba1587ac8672c9061",
+  "result_url": "/api/results/fba1ea9fda97493ba1587ac8672c9061"
+}
+```
+
+**2. Poll.** Cheap enough to call once a second; it deliberately carries no
+detections, so a client watching a progress bar is not re-downloading polygons
+to learn that nothing has finished yet.
+
+```json
+{
+  "job_id": "fba1ea...",
+  "status": "running",
+  "stage": "detecting",
+  "progress": 0.42,
+  "image_name": "scene.tif",
+  "boundary_name": "stand.kml",
+  "parameters": { "confidence_threshold": 0.3, "min_crown_area_m2": 1.0, "engine": "auto", ... },
+  "created_at": "2026-09-13T15:55:51+00:00",
+  "started_at": "2026-09-13T15:55:51+00:00",
+  "finished_at": null,
+  "processing_time_seconds": null,
+  "error": null,
+  "result_url": null
+}
+```
+
+`status` is `queued`, `running`, `completed` or `failed`. `stage` moves through
+`reading`, `detecting`, `measuring`, `summarising`.
+
+**`progress` counts tiles completed, not seconds elapsed.** A progress bar that
+is really a stopwatch tells the user how long they have waited, which they
+already know. It is a measure of work done, and it is not an estimate of time
+remaining - the API does not offer one it cannot compute. An image small enough
+to be a single tile therefore jumps rather than sweeping, which is the honest
+shape of that work.
+
+`processing_time_seconds` is measured from when the analysis *started*, not
+from when the job was created: time spent queued behind other work is not time
+the pipeline spent on this image.
+
+**3. Collect.** `GET /api/results/{job_id}` once the status is `completed`.
+Asking earlier returns `409 job_not_finished` and names the URL to poll; asking
+for a job that failed returns the failure's own code and message, exactly as a
+synchronous call would have.
+
+```json
+{
+  "job_id": "fba1ea...",
+  "status": "completed",
+  "image_metadata": {
+    "filename": "scene.tif",
+    "width_px": 600, "height_px": 600,
+    "georeferenced": true,
+    "source_crs": "EPSG:32617",
+    "measurement_crs": "EPSG:32617",
+    "pixel_area_m2": 0.0625,
+    "resolution": [0.25, 0.25],
+    "bounds": [500000.0, 4649626.0, 500150.0, 4649776.0]
+  },
+  "boundary_metadata": {
+    "source_format": "KML",
+    "part_count": 1,
+    "has_holes": false,
+    "area_m2": 11250.0,
+    "area_within_imagery_m2": 11250.0,
+    "imagery_covers_pct": 100.0,
+    "detections_excluded": 2,
+    "geometry": { "type": "Polygon", "coordinates": [[ ... ]] }
+  },
+  "summary": {
+    "tree_count": 1,
+    "total_canopy_area_m2": 140.09,
+    "analyzed_area_m2": 11250.0,
+    "canopy_coverage_pct": 1.25,
+    "coverage_basis": "area",
+    "sum_crown_area_m2": 140.09,
+    "mean_crown_area_m2": 140.094,
+    "confidence_distribution": [ { "lower": 0.5, "upper": 0.6, "count": 1 } ],
+    "engine": "deepforest",
+    "confidence_kind": "model",
+    "excluded_by_boundary": 2,
+    "raw_detections": 4,
+    "duplicates_removed": 1
+  },
+  "detections": [
+    {
+      "id": "crown_00001",
+      "confidence": 0.5008,
+      "confidence_kind": "model",
+      "area_m2": 140.094,
+      "pixel_area": 2241.5,
+      "centroid_lon": -80.99954435,
+      "centroid_lat": 41.99914226,
+      "geometry": { "type": "Polygon", "coordinates": [[ ... ]] },
+      "geometry_px": { "type": "Polygon", "coordinates": [[ ... ]] }
+    }
+  ],
+  "processing_time": { "seconds": 31.247, "pipeline_seconds": 31.247, "tiles_processed": 1 },
+  "warnings": [],
+  "limitations": { "notice": "Results are model estimates, not measurements. ...", "items": [ ... ] },
+  "downloads": { "csv": "/api/results/fba1ea.../csv", "geojson": "/api/results/fba1ea.../geojson" }
+}
+```
+
+Three things about that payload are deliberate:
+
+- **`boundary_metadata.area_m2`, `summary.analyzed_area_m2` and
+  `summary.total_canopy_area_m2` are three different quantities** and coverage
+  divides by the second. See
+  [Three areas, three meanings](#three-areas-three-meanings).
+- **`limitations` travels with the numbers.** The figure that gets pasted into
+  a report is the one from this response, so the caveat is part of it rather
+  than a line in the documentation. `limitations` holds the standing limits of
+  the method; `warnings` holds what was specific to *this* image and boundary.
+- **`geometry` is null and every `*_m2` field is null for imagery with no
+  georeferencing.** `geometry_px` and the pixel figures are still real, because
+  they are measured from the image itself. Nothing is scaled by an assumed
+  ground resolution to make the response look complete.
+
+**4. Download.** Both exports are generated from the stored result on request,
+with a `Content-Disposition` filename:
+
+```bash
+curl -OJ http://127.0.0.1:8000/api/results/fba1ea.../csv
+curl -OJ http://127.0.0.1:8000/api/results/fba1ea.../geojson
+```
+
+### Where jobs live
+
+In memory, in the API process. Results are useful for as long as the tab that
+asked for them is open, and a database would mean inventing retention rules,
+migrations and cleanup for data whose whole lifetime is a few minutes. The cost
+is stated rather than discovered:
+
+- **A restart forgets every job.** An id from a previous run returns 404, and
+  says so in the message.
+- **Jobs do not survive across worker processes.** Run the API with one worker,
+  or move the store to Redis before scaling out.
+- **At most 50 jobs are remembered**, oldest finished first. Work still running
+  is never evicted to make room.
+
+Uploaded files are deleted as soon as the analysis has read them, so a completed
+job leaves nothing on disk.
+
 
 ```bash
 curl -F file=@stand.kml http://127.0.0.1:8000/api/boundary/preview
@@ -465,6 +670,26 @@ curl -F file=@stand.kml http://127.0.0.1:8000/api/boundary/preview
 `area_m2` is the ground the boundary encloses, measured in `measurement_crs` -
 it is not the analysed area and not the canopy area. The upload is read,
 measured and discarded within the request; nothing is stored.
+
+### Uploads and safety
+
+- **Size limits are enforced on the bytes read**, not on a `Content-Length` the
+  client asserted, so an oversized or lying upload is abandoned mid-stream
+  rather than filling the disk and being rejected afterwards. Imagery and
+  boundaries have separate ceilings - a KML is text describing an outline, and
+  the 512 MB imagery allowance has no business applying to it.
+- **The client's filename is never used as a path.** Only its extension
+  survives, and only after being matched against an allow-list; the stored name
+  is generated. The original is kept for display only, and is what the result
+  and both exports report as the source image.
+- **Job ids index a dictionary**, never a path, so a traversal attempt is
+  simply a key that is not there and answers 404.
+- **Nothing uploaded is executed or interpreted** - imagery is opened by
+  rasterio and boundaries are parsed as XML or JSON, both as data.
+- **CORS is an allow-list** from `CANOPYLENS_CORS_ORIGINS`, not `*`.
+- **Stack traces never appear in a response.** An unexpected failure is logged
+  in full on the server, where it is useful, and returns a plain 500 saying
+  only that the request failed.
 
 Errors are returned as:
 
@@ -561,8 +786,10 @@ such rather than a square-metre value that looks authoritative and is not.
    declared coordinate systems, boundary area in m2, `POST
    /api/boundary/preview`, and the boundary drawn on the map as soon as it is
    dropped. **Done.**
-6. **Analysis endpoints** - imagery upload, analysis, progress reporting and
-   download, mapping the pipeline's typed errors onto the existing error codes.
+6. ~~**Analysis endpoints**~~ - imagery upload with streamed size limits,
+   background jobs with tile-based progress, the full result payload, and CSV
+   and GeoJSON downloads, with the pipeline's typed errors mapped onto the
+   existing error codes. **Done.**
 7. **Results and interaction** - crown polygons on the map, click-to-inspect
    (Crown ID, confidence, area, centroid), the full metrics panel.
 8. **Deployment** - frontend on Vercel, backend on Render or Fly.
