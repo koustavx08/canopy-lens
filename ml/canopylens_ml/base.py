@@ -16,6 +16,15 @@ import numpy as np
 from .types import CrownDetection, DetectionParams
 
 
+class EngineUnavailableError(RuntimeError):
+    """Raised when no detection engine can actually run in this process.
+
+    Deliberately a hard failure: with no engine there is no honest result to
+    return, and returning nothing at all is better than returning something
+    invented.
+    """
+
+
 @dataclass(slots=True)
 class EngineInfo:
     name: str
@@ -25,6 +34,11 @@ class EngineInfo:
     reason: str | None = None
     produces: str = "polygon"  # "polygon" | "bbox"
     requires_download: bool = False
+    # How the confidence value should be read: "model" is a score produced by a
+    # trained detector, "heuristic" is a rule-based plausibility score computed
+    # from shape and colour. The client shows these differently on purpose — a
+    # heuristic score must not be presented as a model probability.
+    confidence_kind: str = "heuristic"
 
 
 class DetectionEngine(abc.ABC):
@@ -35,6 +49,7 @@ class DetectionEngine(abc.ABC):
     description: str = ""
     produces: str = "polygon"
     requires_download: bool = False
+    confidence_kind: str = "heuristic"
 
     @abc.abstractmethod
     def check(self) -> tuple[bool, str | None]:
@@ -58,4 +73,5 @@ class DetectionEngine(abc.ABC):
             reason=reason,
             produces=self.produces,
             requires_download=self.requires_download,
+            confidence_kind=self.confidence_kind,
         )

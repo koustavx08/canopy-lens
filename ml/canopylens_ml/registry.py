@@ -13,6 +13,22 @@ from .base import DetectionEngine, EngineInfo
 
 _FACTORIES: dict[str, Callable[[], DetectionEngine]] = {}
 _INSTANCES: dict[str, DetectionEngine] = {}
+_LOADED = False
+
+
+def _ensure_engines_loaded() -> None:
+    """Import the engines package so its factories are registered.
+
+    Registration is a side effect of importing `canopylens_ml.engines`. Doing
+    it lazily here means callers cannot accidentally observe an empty registry
+    just because they imported the wrong module first, while still keeping the
+    factories themselves lazy - importing the package loads no model.
+    """
+    global _LOADED
+    if _LOADED:
+        return
+    _LOADED = True
+    from . import engines  # noqa: F401
 
 
 def register_engine(name: str, factory: Callable[[], DetectionEngine]) -> None:
@@ -20,10 +36,12 @@ def register_engine(name: str, factory: Callable[[], DetectionEngine]) -> None:
 
 
 def registered_engines() -> list[str]:
+    _ensure_engines_loaded()
     return sorted(_FACTORIES)
 
 
 def get_engine(name: str) -> DetectionEngine:
+    _ensure_engines_loaded()
     if name not in _FACTORIES:
         raise KeyError(f"Unknown detection engine: {name!r}. Known: {registered_engines()}")
     if name not in _INSTANCES:

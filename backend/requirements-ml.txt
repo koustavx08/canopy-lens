@@ -5,3 +5,7 @@
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #   pip install -r requirements-ml.txt
 deepforest==1.5.0
+# DeepForest 1.5 imports `albumentations.functional`, which albumentations
+# 2.x removed. Without this pin the package installs cleanly and then fails
+# on first use, so the ceiling is explicit here.
+albumentations<2.0
