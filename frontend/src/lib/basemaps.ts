@@ -8,6 +8,10 @@ import type { StyleSpecification } from "maplibre-gl";
 function rasterStyle(tiles: string[], attribution: string, maxzoom = 19): StyleSpecification {
   return {
     version: 8,
+    // Text needs glyphs, and a raster style carries none. Crown ID labels are
+    // the only text drawn on the map; if this endpoint is unreachable MapLibre
+    // simply omits them and every other layer still renders.
+    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
     sources: {
       base: { type: "raster", tiles, tileSize: 256, attribution, maxzoom },
     },
@@ -38,3 +42,6 @@ export const BASEMAPS = {
 } as const;
 
 export type BasemapKey = keyof typeof BASEMAPS;
+
+/** Font stack for map labels; MapLibre falls through the list in order. */
+export const LABEL_FONT = ["Open Sans Regular", "Noto Sans Regular"];
