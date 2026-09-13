@@ -1,0 +1,7 @@
+# --- Optional deep-learning detection engine ---
+# Installed separately because torch + weights are ~2.5 GB.
+# The backend runs without these; /api/capabilities reports what is available.
+# CPU-only torch install:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-ml.txt
+deepforest==1.5.0
