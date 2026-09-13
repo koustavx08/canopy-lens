@@ -4,6 +4,7 @@ import { MapView } from "./components/MapView";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { ApiError, fetchCapabilities, previewBoundary } from "./lib/api";
+import { useAnalysis } from "./lib/useAnalysis";
 import type {
   BoundaryPreview,
   Capabilities,
@@ -21,13 +22,18 @@ export default function App() {
   const [boundaryPreview, setBoundaryPreview] = useState<BoundaryPreview | null>(null);
   const [boundaryError, setBoundaryError] = useState<string | null>(null);
   const [boundaryLoading, setBoundaryLoading] = useState(false);
+  const [selectedCrown, setSelectedCrown] = useState<string | null>(null);
   const [settings, setSettings] = useState<DetectionSettings>({
     confidenceThreshold: 0.3,
     minCrownAreaM2: 1,
+    engine: "auto",
   });
 
-  // Load server capabilities once; defaults for the sliders come from there so
-  // the UI and the backend can never drift apart.
+  const analysis = useAnalysis();
+  const { run, reset } = analysis;
+
+  // Load server capabilities once; the defaults for the controls come from
+  // there so the UI and the backend can never drift apart.
   useEffect(() => {
     const controller = new AbortController();
     fetchCapabilities(controller.signal)
@@ -37,6 +43,7 @@ export default function App() {
         setSettings({
           confidenceThreshold: caps.defaults.confidence_threshold,
           minCrownAreaM2: caps.defaults.min_crown_area_m2,
+          engine: caps.defaults.engine,
         });
       })
       .catch((error: unknown) => {
@@ -50,14 +57,22 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  const handleImageSelect = useCallback((file: File | null) => {
-    setImage((previous) => {
-      if (previous?.objectUrl) URL.revokeObjectURL(previous.objectUrl);
-      if (!file) return null;
-      const objectUrl = PREVIEWABLE.test(file.name) ? URL.createObjectURL(file) : null;
-      return { file, objectUrl };
-    });
-  }, []);
+  const handleImageSelect = useCallback(
+    (file: File | null) => {
+      // A result describes the file it was computed from. Swapping the file
+      // out from under it would leave crown polygons drawn over imagery they
+      // were never found in.
+      reset();
+      setSelectedCrown(null);
+      setImage((previous) => {
+        if (previous?.objectUrl) URL.revokeObjectURL(previous.objectUrl);
+        if (!file) return null;
+        const objectUrl = PREVIEWABLE.test(file.name) ? URL.createObjectURL(file) : null;
+        return { file, objectUrl };
+      });
+    },
+    [reset],
+  );
 
   // Read real pixel dimensions from the browser-decodable preview.
   useEffect(() => {
@@ -130,16 +145,38 @@ export default function App() {
       return `No detection engine is available on this server, so no results can be produced. ${reasons}`.trim();
     }
     return null;
-  }, [apiError, availableEngines.length, boundary, boundaryError, boundaryLoading, capabilities, image]);
+  }, [
+    apiError,
+    availableEngines.length,
+    boundary,
+    boundaryError,
+    boundaryLoading,
+    capabilities,
+    image,
+  ]);
 
   const handleRun = useCallback(() => {
-    // Detection is wired up in the analysis phase; the button stays disabled
-    // until the server reports an engine that can actually run.
-  }, []);
+    if (!image) return;
+    setSelectedCrown(null);
+    void run(image.file, boundary, settings);
+  }, [boundary, image, run, settings]);
+
+  const handleCancel = useCallback(() => {
+    setSelectedCrown(null);
+    reset();
+  }, [reset]);
 
   return (
     <div className="flex h-full flex-col">
+      <a
+        href="#results"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-surface-2 focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
+      >
+        Skip to results
+      </a>
+
       <Header capabilities={capabilities} error={apiError} />
+
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <Sidebar
           capabilities={capabilities}
@@ -153,16 +190,34 @@ export default function App() {
           onBoundarySelect={setBoundary}
           onSettingsChange={setSettings}
           onRun={handleRun}
+          onCancel={handleCancel}
           runBlockedReason={runBlockedReason}
-          running={false}
+          phase={analysis.phase}
+          job={analysis.job}
+          uploadFraction={analysis.uploadFraction}
+          error={analysis.error}
         />
-        <MapView
-          image={image}
+
+        <main className="flex min-h-0 min-w-0 flex-1">
+          <MapView
+            image={image}
+            boundary={boundaryPreview}
+            boundaryError={boundaryError}
+            boundaryLoading={boundaryLoading}
+            result={analysis.result}
+            selectedId={selectedCrown}
+            onSelect={setSelectedCrown}
+          />
+        </main>
+
+        <ResultsPanel
+          capabilities={capabilities}
+          apiError={apiError}
           boundary={boundaryPreview}
-          boundaryError={boundaryError}
-          boundaryLoading={boundaryLoading}
+          result={analysis.result}
+          selectedId={selectedCrown}
+          onSelect={setSelectedCrown}
         />
-        <ResultsPanel capabilities={capabilities} apiError={apiError} boundary={boundaryPreview} />
       </div>
     </div>
   );
