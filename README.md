@@ -11,19 +11,23 @@ the result.
 
 ## Project status
 
-**The detection pipeline is implemented and tested. It is not yet wired to the
-HTTP API or the user interface.**
+**The detection pipeline and the geospatial boundary workflow are implemented
+and tested. The analysis endpoint that joins them to the browser is not built
+yet.**
 
 | Area | State |
 | --- | --- |
 | Backend service, config, typed errors, capability reporting | Working |
 | Detection engines: classical CV baseline, DeepForest | Working |
 | Raster reading, tiling, overlap deduplication | Working |
-| CRS handling, reprojection, area in m2, KML/KMZ/GeoJSON clipping | Working |
+| CRS handling, reprojection, area in m2 | Working |
+| KML/KMZ/GeoJSON parsing, repair, measurement, clipping | Working |
+| `POST /api/boundary/preview` - parse, measure and return a boundary | Working |
+| Boundary drawn on the map, with its area, the moment it is dropped | Working |
 | `analyze_image()`, `export_csv()`, `export_geojson()` | Working |
-| Test suite (244 tests) | Passing |
+| Test suite (341 tests) | Passing |
 | HTTP upload / analysis / export endpoints | **Not built yet** |
-| Frontend wired to real results, crown rendering, click-to-inspect | **Not built yet** |
+| Crown rendering and click-to-inspect in the map | **Not built yet** |
 
 The pipeline can be driven directly today:
 
@@ -41,10 +45,14 @@ result = analyze_image(
 print(result.summary.tree_count, result.summary.canopy_coverage_pct)
 ```
 
-Until the endpoints exist, **Run analysis in the browser is still disabled and
-says why**. No part of the UI shows an invented tree count, area or coverage
-figure to fill that gap - metrics read as an em dash until a real analysis
-produces them.
+Boundaries are already end-to-end: drop a KML, KMZ or GeoJSON into the browser
+and it is parsed server-side, drawn on the map, and reported with the area it
+encloses in square metres.
+
+Until the analysis endpoint exists, **Run analysis in the browser is still
+disabled and says why**. No part of the UI shows an invented tree count, area
+or coverage figure to fill that gap - detection metrics read as an em dash
+until a real analysis produces them.
 
 ---
 
@@ -53,13 +61,14 @@ produces them.
 - Detects individual tree crowns in imagery and counts them
 - Reports per-crown area, total canopy area, analysed area and canopy coverage %
 - Reports a confidence value per crown, labelled with what kind of score it is
-- Clips detections to a KML/KMZ/GeoJSON boundary
+- Parses a KML, KMZ or GeoJSON boundary, draws it on the map, and reports the
+  area it encloses in square metres
+- Restricts the analysis to that boundary and excludes detections outside it
 - Exports results as CSV and GeoJSON
 - Says clearly when the imagery cannot support a physical-area estimate
 
-Still to come: the HTTP endpoints and the browser interface that put the above
-in front of a user - crown polygons on the map, click-to-inspect, download
-buttons.
+Still to come: the analysis endpoint and the parts of the interface that depend
+on it - crown polygons on the map, click-to-inspect, download buttons.
 
 ---
 
@@ -118,9 +127,11 @@ overestimate is visible rather than hidden.
 9. **Clip to the boundary**, if one was supplied. The KML polygon is reprojected
    *into the raster CRS* - the imagery is never resampled - and crowns whose
    centroid falls outside it are excluded. The analysed area becomes the
-   clipped region, so coverage stays honest.
-10. **Summarise**: count, total canopy area, analysed area, coverage %, mean and
-    median crown area, and a confidence distribution.
+   clipped region, so coverage stays honest. See
+   [The boundary workflow](#the-boundary-workflow).
+10. **Summarise**: count, detected crown area, analysed area, coverage %, mean
+    and median crown area, and a confidence distribution. The boundary's own
+    area is reported separately, because it is not the analysed area.
 
 ### How the numbers are defined
 
@@ -133,6 +144,9 @@ overestimate is visible rather than hidden.
   nodata excluded. A mosaic clipped to an irregular shape is stored in a
   rectangular file with blank corners, and counting those as analysed ground
   would understate coverage.
+- **Boundary area is not analysed area.** The boundary encloses whatever the
+  user drew; the analysed area is only the part of it the imagery reaches.
+  Coverage divides by the second. Both are reported, labelled, and exported.
 - **Area is never computed from degrees.** Latitude and longitude are angles;
   `shapely.area` on a WGS84 polygon returns square degrees. Every area is
   measured after reprojecting into a projected, metre-based CRS. Web Mercator
@@ -142,6 +156,95 @@ overestimate is visible rather than hidden.
   is empty rather than guessed. Pixel areas are reported because they are true
   regardless of metadata, coverage is computed in pixel space, and the result
   carries a warning saying exactly why no areas are available.
+
+---
+
+## The boundary workflow
+
+A forest boundary is optional. When one is supplied it does three jobs: it
+tells the user where their analysis will happen, it restricts the analysis to
+that ground, and it gives the coverage percentage an honest denominator.
+
+### What happens to the file
+
+1. **Read.** `.kml`, `.kmz`, `.geojson` and `.json` are accepted. KMZ is a
+   zipped KML and is unzipped in place. KML is parsed directly from its XML
+   rather than through GDAL's KML driver, which is optional in a GDAL build and
+   would make boundary support work on one machine and fail on another.
+2. **Extract every area.** Polygons, multi-geometries, inner boundaries
+   (clearings), and - where a tool exported an area as a closed path - bare
+   `LinearRing` and `LineString` elements.
+3. **Repair, then merge.** Each polygon is repaired individually *before* the
+   union. A hand-drawn boundary that crosses itself is a bow-tie, and
+   `unary_union` raises on some of them; repaired first, one bad ring costs
+   that ring rather than the whole file. Polygons that touch merge into one
+   part; polygons that do not stay separate.
+4. **Establish the CRS.** KML is WGS84 by the OGC specification and GeoJSON is
+   WGS84 by RFC 7946, so this is asserted rather than guessed from the size of
+   the numbers. The exception is a GeoJSON carrying the pre-RFC 7946 `crs`
+   member, which QGIS and ArcGIS still emit: that declaration is honoured, with
+   a warning, because reading an easting of 500000 as a longitude would put the
+   stand in the Gulf of Guinea.
+5. **Measure.** The boundary is reprojected into a projected, metre-based CRS
+   and its area taken there. During an analysis that CRS is the one the imagery
+   is measured in, so the boundary area and the analysed area are figures in
+   the same projection rather than two numbers that merely look comparable.
+6. **Reproject into the raster's CRS.** The boundary moves to the imagery, not
+   the other way round, so the raster is never resampled and no pixel value is
+   altered before detection.
+7. **Clip.** A crown belongs to the boundary when its centroid does. Requiring
+   the whole polygon to be inside would drop every tree on the forest edge;
+   accepting any overlap would pull in trees that are mostly outside it.
+8. **Draw.** `POST /api/boundary/preview` returns the geometry in WGS84 for the
+   map, so the outline the user sees is the same geometry the analysis will
+   clip to - not a separate browser-side approximation of it.
+
+### Three areas, three meanings
+
+This is the distinction the whole section exists for. They are different
+numbers and the application never uses one where it means another.
+
+| Figure | What it measures | Where it comes from |
+| --- | --- | --- |
+| **Boundary area** | The ground the uploaded file encloses, clearings excluded | The boundary file alone. It exists whether or not any imagery covers it |
+| **Analysed area** | The part of that ground the imagery actually covers, with nodata removed | Imagery footprint ∩ boundary, scaled by the valid-data fraction |
+| **Detected crown area** | The ground covered by crowns inside the analysed area | The union of crown polygons, clipped to the analysed region |
+
+```text
+canopy coverage % = detected crown area / analysed area * 100
+```
+
+The denominator is the **analysed area**, never the boundary area. A boundary
+twice the size of the image would otherwise halve the coverage figure while
+looking entirely reasonable. When the imagery does not cover the whole
+boundary the result says so:
+
+```text
+The imagery covers 49.6% of the boundary (22,100 m2 of 44,600 m2).
+Results describe only the part of the boundary the image reaches.
+```
+
+### Edge cases and what the user is told
+
+Every one of these returns a message naming what to change, not a stack trace
+and not an empty map.
+
+| Case | Behaviour |
+| --- | --- |
+| Invalid XML or JSON | `invalid_boundary`, quoting the parser's own position |
+| Empty file (0 bytes) or empty document | Reported as empty before parsing is attempted |
+| A KML of pins or paths only | Explained as "use the polygon tool", not "no polygon found" |
+| A polygon whose points are collinear | Refused as zero-area rather than measured as 0 |
+| A self-intersecting ring | Repaired; the area is taken from the repaired geometry |
+| Several polygons | Kept as separate parts, counted, and reported in the warnings |
+| Touching polygons | Merged into one part, since they describe one area |
+| Holes (clearings) | Subtracted from the boundary area and from the analysed area |
+| Boundary larger than the imagery | Allowed; the shortfall is measured and warned about |
+| A part with no imagery over it | Counted in the boundary area, reported as not analysed |
+| Boundary nowhere near the imagery | Refused, with both extents in the error detail |
+| Boundary on non-georeferenced imagery | Refused: there is no way to say which pixels it covers |
+| Projected GeoJSON (`crs` member) | Honoured and reprojected, with a warning |
+| KMZ with no KML inside, or a corrupt archive | Refused, with advice on what to upload instead |
 
 ---
 
@@ -297,7 +400,8 @@ unset. Full annotated list: [`.env.example`](.env.example).
 | `CANOPYLENS_PORT` | `8000` | Port uvicorn binds to |
 | `CANOPYLENS_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated allowed browser origins |
 | `CANOPYLENS_DATA_DIR` | `backend/.data` | Where uploads and results are written; relative paths resolve from the repo root |
-| `CANOPYLENS_MAX_UPLOAD_MB` | `512` | Per-file upload limit; larger requests get HTTP 413 |
+| `CANOPYLENS_MAX_UPLOAD_MB` | `512` | Per-file imagery upload limit; larger requests get HTTP 413 |
+| `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` | `32` | Separate, much lower limit for boundary files — a KML is text describing an outline, and the imagery allowance has no business applying to it |
 | `CANOPYLENS_TILE_SIZE` | `800` | Tile edge length in pixels |
 | `CANOPYLENS_TILE_OVERLAP` | `160` | Overlap between neighbouring tiles, in pixels |
 | `CANOPYLENS_MAX_PIXELS_WITHOUT_TILING` | `4000000` | Rasters smaller than this are processed in one pass |
@@ -335,7 +439,32 @@ check whether a file carries usable georeferencing.
 | --- | --- |
 | `GET /api/health` | Liveness: status, version, environment |
 | `GET /api/capabilities` | What this running process can actually do: installed dependency versions, per-engine availability with reasons, processing limits, detection defaults, supported formats |
+| `POST /api/boundary/preview` | Parse a KML, KMZ or GeoJSON boundary and return it as WGS84 geometry plus its measured area |
 | `GET /docs` | Interactive OpenAPI documentation |
+
+```bash
+curl -F file=@stand.kml http://127.0.0.1:8000/api/boundary/preview
+```
+
+```json
+{
+  "geometry": { "type": "Polygon", "coordinates": [[ ... ]] },
+  "area_m2": 44600.0,
+  "area_hectares": 4.46,
+  "part_count": 1,
+  "has_holes": true,
+  "source_format": "KML",
+  "source_crs": "EPSG:4326",
+  "measurement_crs": "EPSG:32617",
+  "bounds_wgs84": [-81.0, 41.99864692, -80.99637758, 41.99999798],
+  "centroid_wgs84": [-80.99818879, 41.99932245],
+  "warnings": []
+}
+```
+
+`area_m2` is the ground the boundary encloses, measured in `measurement_crs` -
+it is not the analysed area and not the canopy area. The upload is read,
+measured and discarded within the request; nothing is stored.
 
 Errors are returned as:
 
@@ -397,6 +526,17 @@ displayed in the app itself, not buried here:
   true crown wherever foliage is in deep shadow or occluded by a neighbour.
   Measured against synthetic circles the segmentation runs a few per cent
   under the true area.
+- **A boundary is taken as drawn.** CanopyLens measures and clips to the
+  polygon in the file; it does not check that the polygon is where the forest
+  actually is. A boundary traced loosely around a stand will report more
+  analysed ground than the stand contains, and the coverage figure follows.
+- **Coverage describes the analysed area, not the stand.** Where the imagery
+  covers only part of the boundary, the percentage is for the part that was
+  photographed. The shortfall is measured and warned about, but the number
+  itself cannot stand in for the whole stand.
+- **A crown belongs to the boundary when its centre does.** Trees straddling
+  the line are counted in full or not at all, so a long, thin boundary through
+  dense canopy has more edge error than a compact one.
 - **No ground-truth validation is performed.** Nothing this tool outputs is a
   field-verified tree inventory, and it should not be presented as one.
 
@@ -417,11 +557,15 @@ such rather than a square-metre value that looks authoritative and is not.
    CRS. **Done.**
 4. ~~**Export**~~ - `export_csv()` and `export_geojson()` generated from the
    real analysis. **Done.**
-5. **HTTP endpoints** - upload, analysis, progress reporting and download,
-   mapping the pipeline's typed errors onto the existing error codes.
-6. **Results and interaction** - crown polygons on the map, click-to-inspect
+5. ~~**Boundary workflow**~~ - parsing, repair, multi-part and hole handling,
+   declared coordinate systems, boundary area in m2, `POST
+   /api/boundary/preview`, and the boundary drawn on the map as soon as it is
+   dropped. **Done.**
+6. **Analysis endpoints** - imagery upload, analysis, progress reporting and
+   download, mapping the pipeline's typed errors onto the existing error codes.
+7. **Results and interaction** - crown polygons on the map, click-to-inspect
    (Crown ID, confidence, area, centroid), the full metrics panel.
-7. **Deployment** - frontend on Vercel, backend on Render or Fly.
+8. **Deployment** - frontend on Vercel, backend on Render or Fly.
 
 ---
 

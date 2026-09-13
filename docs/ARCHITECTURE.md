@@ -3,10 +3,12 @@
 This document describes how the system is put together, why it is split the way
 it is, and which parts are deliberately not built yet.
 
-> **Status: detection pipeline complete.** Engines, tiling, deduplication,
-> CRS handling, boundary clipping, area measurement and export are implemented
-> and covered by 244 tests. What remains is the HTTP layer that exposes them
-> and the frontend wiring that displays them — see
+> **Status: detection pipeline and boundary workflow complete.** Engines,
+> tiling, deduplication, CRS handling, boundary parsing and measurement,
+> clipping, area measurement and export are implemented and covered by 341
+> tests. Boundaries run end to end: `POST /api/boundary/preview` parses and
+> measures one, and the map draws it. What remains is the analysis endpoint and
+> the crown rendering that depends on it — see
 > [Not built yet](#not-built-yet). Nothing in the UI currently fabricates a
 > result to stand in for that gap; controls that cannot do real work are
 > disabled with the reason shown.
@@ -53,7 +55,18 @@ backend/app/
   schemas.py          pydantic response models (the API contract)
   logging_config.py   logging setup
   routers/            HTTP layer: parse, validate, delegate, serialise
+    health.py         liveness and capability reporting
+    boundary.py       boundary upload, parsing and measurement
   services/           domain logic; no FastAPI imports
+    raster.py         rasterio reading, tiling, dtype normalisation
+    geo.py            CRS selection, reprojection, area in m2 — the only place
+                      a pixel becomes a metre
+    boundary.py       KML/KMZ/GeoJSON parsing, repair and measurement
+    dedup.py          non-maximum suppression across tile seams
+    analysis.py       the orchestrator: analyze_image()
+    export.py         CSV and GeoJSON
+    uploads.py        streamed, size-limited receipt of uploaded files
+    capabilities.py   what this process can actually do, read from the process
 ```
 
 Routers do no domain work and services do no HTTP work. A service raises a
@@ -75,7 +88,7 @@ of `message`, so error text can be reworded without breaking the client.
 | `missing_georeference` | 422 | Physical area was requested but the raster has no CRS/transform |
 | `invalid_boundary` | 422 | KML/KMZ/GeoJSON cannot be parsed into a usable geometry |
 | `engine_unavailable` | 503 | No detection engine can actually run in this process |
-| `payload_too_large` | 413 | Upload exceeds `CANOPYLENS_MAX_UPLOAD_MB` |
+| `payload_too_large` | 413 | Upload exceeds `CANOPYLENS_MAX_UPLOAD_MB`, or `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` for a boundary file |
 | `not_found` | 404 | A referenced analysis or upload does not exist |
 | `invalid_request` | 422 | Request-body validation failed |
 
@@ -118,8 +131,8 @@ point is `analysis.analyze_image()`.
 | 7. Deduplicate | `services/dedup.py` | IoU non-maximum suppression plus a containment rule, over an R-tree |
 | 8. Filter | `services/analysis.py` | Confidence, then minimum area |
 | 9. Georeference and measure | `services/geo.py` | Affine to raster CRS, reproject to metric CRS, repair, measure |
-| 10. Clip | `services/boundary.py` | Boundary reprojected into the raster CRS; crowns outside it are excluded |
-| 11. Summarise | `services/analysis.py` | Counts, areas, coverage, statistics, confidence distribution |
+| 10. Clip and measure the boundary | `services/boundary.py` | Boundary parsed, repaired, measured in the imagery's metric CRS, then reprojected into the raster CRS; crowns whose centroid falls outside are excluded. See [The boundary workflow](#the-boundary-workflow) |
+| 11. Summarise | `services/analysis.py` | Counts, the three areas, coverage, statistics, confidence distribution |
 | 12. Export | `services/export.py` | CSV and GeoJSON |
 
 ### Why deduplication needs more than IoU
@@ -173,6 +186,92 @@ albumentations 2.x had removed it. An availability check that does not exercise
 the real entry point is a claim, not a check; the version ceiling is now pinned
 and the probe goes deep enough to catch the next one.
 
+## The boundary workflow
+
+`services/boundary.py` reads the file; `services/geo.py` measures it;
+`routers/boundary.py` exposes it; `services/analysis.py` applies it. The split
+matters: the parser knows about XML and archives, the geo layer knows about
+projections, and neither knows about HTTP.
+
+### Why KML is parsed directly rather than through GDAL
+
+GDAL's KML driver is optional. Whether it is present depends on how the wheel
+or the container image was built, so a boundary feature that relies on it works
+on the developer's machine and fails in production for reasons that have
+nothing to do with the file. KML is a small, well specified XML format and the
+subset that matters — polygons, inner boundaries, multi-geometries — is short
+to read directly. Tag matching ignores namespaces, because real exports declare
+several different ones and some declare none.
+
+### Why repair happens before the union, not after
+
+A hand-drawn boundary that crosses itself is a bow-tie, and `unary_union`
+raises on some of them. Repairing each polygon individually first means one bad
+ring in a twenty-stand file costs that ring rather than the whole upload. The
+same rule applies to the result: `all_polygons` keeps every part of a boundary,
+unlike `largest_polygon` which is used for crowns — dropping the smaller parts
+of a multi-stand boundary would silently shrink the region being analysed.
+
+### Why a declared CRS is honoured
+
+KML is WGS84 by the OGC specification and GeoJSON is WGS84 by RFC 7946, so
+neither is inferred from the magnitude of the coordinates. The exception is the
+pre-RFC 7946 `crs` member, which QGIS and ArcGIS still emit. Ignoring it means
+reading an easting of 500000 as a longitude and placing an Ontario woodlot in
+the Gulf of Guinea. It is honoured, and a warning says that it was.
+
+### Why the boundary moves to the imagery
+
+The boundary is reprojected into the raster's CRS, not the other way round.
+Reprojecting the raster would resample it, altering pixel values before any
+detection runs — the detection would then be of a slightly different image than
+the one the user uploaded.
+
+### Three areas that must not be confused
+
+| Figure | Definition | Reported on |
+| --- | --- | --- |
+| Boundary area | Ground the file encloses, holes excluded | `AnalysisResult.boundary.area_m2` |
+| Analysed area | Imagery footprint ∩ boundary, minus nodata | `AnalysisSummary.analyzed_area_m2` |
+| Detected crown area | Union of crown polygons clipped to the analysed region | `AnalysisSummary.total_canopy_area_m2` |
+
+```text
+canopy coverage % = detected crown area / analysed area * 100
+```
+
+The denominator is the analysed area. Dividing by the boundary area instead
+would halve the coverage for a boundary twice the size of the image, and the
+result would look entirely plausible — which is precisely why the three live in
+separate fields with separate names rather than as one reused `area`.
+
+When the imagery does not cover the whole boundary, `imagery_covers_pct`
+records the shortfall and a warning states it in square metres. A boundary
+larger than the image is a normal thing to upload; a result that quietly
+describes the overlap while appearing to describe the stand is not.
+
+### Membership is decided by the centroid
+
+A crown belongs to the boundary when its centroid does. Requiring the whole
+polygon to be inside would drop every tree on the forest edge; accepting any
+overlap would pull in trees that are mostly outside. `covers` rather than
+`contains`, so a centroid landing exactly on the line counts as inside. The
+crown's *area* contribution is still clipped to the analysed region, so a tree
+on the edge is counted once and measured only where it is.
+
+### The preview endpoint exists to prevent a slow mistake
+
+`POST /api/boundary/preview` parses and measures a boundary and returns it as
+WGS84 geometry. A user who uploaded the wrong KML finds out from the map in a
+second rather than from a tree count twenty minutes later that quietly
+describes the wrong stand. The upload is read and discarded inside the request:
+a preview is answered immediately, so storing it would only accumulate files
+nobody will ask for again.
+
+The area is computed on the server, not in the browser. Measuring it correctly
+requires reprojection into a chosen projected CRS, and that is done in exactly
+one place; a number produced twice by two code paths is a number that will
+eventually disagree with itself.
+
 ## Frontend structure
 
 ```
@@ -181,7 +280,8 @@ frontend/src/
   components/
     Header.tsx         product identity
     Sidebar.tsx        upload, boundary, detection settings, run control
-    MapView.tsx        MapLibre map / raster imagery preview, crown overlay
+    MapView.tsx        MapLibre map / raster imagery preview, boundary layer,
+                       crown overlay
     ResultsPanel.tsx   metrics, confidence distribution, CSV + GeoJSON export
     Limitations.tsx    permanently visible, not hidden behind a disclosure
     Dropzone.tsx       shared file-input primitive
@@ -202,6 +302,14 @@ do not.
 
 Basemaps are key-free (Esri World Imagery, OpenStreetMap) so the app runs with
 no account or token. `VITE_BASEMAP_STYLE_URL` overrides them.
+
+The boundary is drawn from the geometry the server returned, so the outline on
+screen is the same geometry the analysis will clip to rather than a separate
+browser-side parse of the same file. Changing the basemap replaces the whole
+MapLibre style, taking every source and layer with it, so the boundary layer is
+re-added on `styledata` rather than only when the boundary changes. It is drawn
+in amber: the layer sits over satellite imagery of a forest, and a green
+outline on green canopy is an outline nobody can see.
 
 ## Development and deployment
 
@@ -240,26 +348,38 @@ being identical in degrees; and the naive square-degrees answer is asserted to
 be wrong by nine orders of magnitude, so a regression reads as an obvious
 failure rather than as a plausible number.
 
+The boundary tests follow the same rule. Stands are rectangles written in
+projected metres — `utm_rect(500000, 4649000, 500100, 4649100)` is a hundred
+metre square whether or not the code agrees — and converted to degrees only at
+the point the file is written. The expected area is then the rectangle's own
+arithmetic, so `10000` is a fact about the geometry rather than a value
+recorded from an earlier run.
+
 | Area | File |
 | --- | --- |
 | CRS selection, UTM zones, reprojection | `tests/geo/test_crs.py` |
 | Area measurement, the degrees trap, geometry repair | `tests/geo/test_area.py` |
-| KML/KMZ/GeoJSON parsing and clipping | `tests/geo/test_boundary.py` |
+| KML/KMZ/GeoJSON parsing, repair, holes, multi-part, declared CRS | `tests/geo/test_boundary.py` |
+| Boundary area in m2, holes, the degrees trap, projection choice | `tests/geo/test_boundary_area.py` |
 | Duplicate removal | `tests/geo/test_dedup.py` |
 | Raster metadata, tiling windows, dtype handling | `tests/geo/test_raster.py` |
-| End-to-end analysis, filtering, summary statistics | `tests/pipeline/test_analysis.py` |
+| End-to-end analysis, filtering, summary statistics, boundary clipping | `tests/pipeline/test_analysis.py` |
 | CSV and GeoJSON export | `tests/pipeline/test_export.py` |
+| Health, capabilities, the boundary endpoint | `tests/backend/` |
+| Upload size limits and filename handling | `tests/backend/test_uploads.py` |
 | Engines, registry, pixel-space primitives | `tests/ml/` |
 
 ## Not built yet
 
 Listed so the gap is explicit rather than discovered:
 
-- HTTP endpoints for upload, analysis and export. The pipeline is callable as
-  `analyze_image()` / `export_csv()` / `export_geojson()`, but nothing serves it
-  over the network yet
+- HTTP endpoints for imagery upload, analysis and export. The pipeline is
+  callable as `analyze_image()` / `export_csv()` / `export_geojson()`, but
+  nothing serves those over the network yet. `POST /api/boundary/preview` is
+  the one analysis-adjacent endpoint that does exist
 - Progress reporting for long-running analyses
 - Crown polygon rendering and click-to-inspect in the map
-- Frontend wiring to real results; the UI still shows em dashes and a disabled
-  Run control with its reason
+- Frontend wiring to real detection results; the detection metrics still show
+  em dashes and the Run control is disabled with its reason. Boundary figures
+  are real, because they come from a real parse of a real file
 - Deployment configuration for a hosted environment
