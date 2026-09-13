@@ -12,7 +12,12 @@ the caller raises rather than falling back to invented detections.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..registry import register_engine
+
+if TYPE_CHECKING:  # imported for typing only; the runtime path stays lazy
+    from ..base import DetectionEngine
 
 # Each entry is a lazy factory path so that importing the registry never pulls
 # in torch or downloads model weights.
@@ -41,7 +46,7 @@ def _install() -> None:
 _install()
 
 
-def resolve_engine(name: str = "auto") -> "DetectionEngine":
+def resolve_engine(name: str = "auto") -> DetectionEngine:
     """Return an engine that reports itself genuinely runnable.
 
     "auto" walks PREFERENCE_ORDER and returns the first available engine. A

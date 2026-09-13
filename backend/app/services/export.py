@@ -165,9 +165,11 @@ def _metadata(result: AnalysisResult) -> dict:
 
 def _provenance_lines(result: AnalysisResult) -> list[str]:
     summary = result.summary
+    generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    size = f"{result.raster.width}x{result.raster.height} px"
     lines = [
-        f"CanopyLens crown export - generated {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-        f"Source image: {result.raster.path.name} ({result.raster.width}x{result.raster.height} px)",
+        f"CanopyLens crown export - generated {generated}",
+        f"Source image: {result.raster.path.name} ({size})",
         f"Engine: {result.engine} (confidence is a {result.confidence_kind} score)",
         f"Confidence threshold: {result.confidence_threshold}",
         f"Trees detected: {summary.tree_count}",

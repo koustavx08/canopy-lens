@@ -42,9 +42,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from affine import Affine
-from canopylens_ml import CrownDetection, DetectionParams
+from canopylens_ml import CrownDetection, DetectionParams, resolve_engine, translate
 from canopylens_ml import EngineUnavailableError as MlEngineUnavailable
-from canopylens_ml import resolve_engine, translate
 from pyproj import CRS
 from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -260,7 +259,9 @@ def analyze_image(
         polygon = geo.largest_polygon(Polygon(detection.polygon))
         if polygon is None:
             continue
-        candidates.append(Candidate(polygon=polygon, confidence=detection.confidence, payload=detection))
+        candidates.append(
+            Candidate(polygon=polygon, confidence=detection.confidence, payload=detection)
+        )
 
     kept = suppress(candidates, iou_threshold=iou_threshold)
     duplicates_removed = len(candidates) - len(kept)
@@ -466,9 +467,8 @@ def _build_crowns(
     measured.sort(key=lambda item: (item[0].centroid.y, item[0].centroid.x))
 
     crowns: list[Crown] = []
-    for index, (pixel_polygon, confidence, pixel_area_value, area, geometry_crs, attrs) in enumerate(
-        measured, start=1
-    ):
+    for index, entry in enumerate(measured, start=1):
+        pixel_polygon, confidence, pixel_area_value, area, geometry_crs, attrs = entry
         centroid = pixel_polygon.centroid
         geometry_wgs84 = None
         centroid_lonlat = None
@@ -528,7 +528,7 @@ def _valid_data_fraction(
         else:
             from rasterio.features import geometry_mask
 
-            decimated = src.transform * Affine.scale(
+            decimated = src.transform @ Affine.scale(
                 src.width / mask.shape[1], src.height / mask.shape[0]
             )
             inside = geometry_mask(

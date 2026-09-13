@@ -109,7 +109,9 @@ def metric_crs_for(geometry: BaseGeometry, source_crs: CRS) -> CRS:
 @lru_cache(maxsize=64)
 def _transformer(source: str, target: str) -> Transformer:
     """Cached transformer. Building one is expensive; they are reused per crown."""
-    return Transformer.from_crs(CRS.from_user_input(source), CRS.from_user_input(target), always_xy=True)
+    return Transformer.from_crs(
+        CRS.from_user_input(source), CRS.from_user_input(target), always_xy=True
+    )
 
 
 def to_crs(geometry: BaseGeometry, source_crs: CRS, target_crs: CRS) -> BaseGeometry:

@@ -203,7 +203,7 @@ def parse_geojson(text: str) -> BaseGeometry:
                 ) from exc
 
     collect(payload)
-    polygons = [g for g in geometries if isinstance(g, (Polygon, MultiPolygon))]
+    polygons = [g for g in geometries if isinstance(g, Polygon | MultiPolygon)]
     if not polygons:
         raise InvalidBoundaryError(
             "No polygon was found in the boundary file. CanopyLens needs an "

@@ -89,7 +89,17 @@ def otsu_threshold(values: np.ndarray) -> float:
     mean1 = np.divide(mean_total - sum_all, w1, out=np.zeros_like(sum_all), where=w1 > 0)
     between = w0 * w1 * (mean0 - mean1) ** 2
     between[~valid] = -1.0
-    return float(centres[int(np.argmax(between))])
+
+    # When the two populations are cleanly separated, every bin in the empty
+    # gap between them scores identically, because none of w0, w1, mean0 or
+    # mean1 changes across it. np.argmax would return the lowest such bin,
+    # putting the threshold right at the top edge of the darker population
+    # instead of in the middle of the gap. Taking the centre of the tied
+    # plateau keeps the cut where the separation is widest, which is what
+    # makes the mask robust to a little noise on either side.
+    best = between.max()
+    tied = np.flatnonzero(between >= best - 1e-12)
+    return float(centres[int(np.median(tied))])
 
 
 def vegetation_threshold(exg: np.ndarray, floor: float = VEGETATION_FLOOR) -> float:

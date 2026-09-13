@@ -20,6 +20,11 @@ Ring = list[tuple[float, float]]
 
 def _as_array(ring: Ring) -> np.ndarray:
     arr = np.asarray(ring, dtype=np.float64)
+    if arr.size == 0:
+        # An empty ring is a degenerate shape, not malformed input: area and
+        # perimeter are legitimately zero. Only the centroid, which has no
+        # meaningful answer, treats it as an error.
+        return arr.reshape(0, 2)
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise ValueError("A ring must be a sequence of (x, y) pairs")
     # Drop an explicitly closed final vertex; the shoelace formula closes the
