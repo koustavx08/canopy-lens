@@ -55,7 +55,8 @@ from ..errors import (
     MissingGeoreferenceError,
 )
 from . import geo, raster
-from .boundary import load_boundary
+from .boundary import LoadedBoundary, load_boundary
+from .boundary import measure as measure_boundary
 from .dedup import DEFAULT_IOU_THRESHOLD, Candidate, suppress
 
 log = logging.getLogger(__name__)
@@ -112,8 +113,54 @@ class ConfidenceBin:
 
 
 @dataclass(frozen=True)
+class BoundarySummary:
+    """The supplied boundary, measured in its own right.
+
+    This is deliberately separate from the scene figures, because three areas
+    are in play and confusing them is the easiest way to publish a wrong
+    number:
+
+    - **Boundary area** (`area_m2`) is the ground the KML encloses. It is a
+      property of the file the user drew, and it exists whether or not any
+      imagery covers it.
+    - **Analysed area** (`AnalysisSummary.analyzed_area_m2`) is the part of
+      that boundary the imagery actually covers, with nodata removed. It is
+      the denominator of canopy coverage.
+    - **Detected crown area** (`AnalysisSummary.total_canopy_area_m2`) is the
+      ground covered by crowns inside the analysed area.
+
+    `imagery_covers_pct` is what fraction of the boundary the imagery reaches.
+    A boundary larger than the image is legitimate - it is also a reason the
+    user should not read the result as a survey of the whole stand.
+    """
+
+    area_m2: float
+    area_within_imagery_m2: float
+    imagery_covers_pct: float
+    part_count: int
+    parts_intersecting_imagery: int
+    has_holes: bool
+    source_format: str
+    measurement_crs: str
+    bounds_wgs84: tuple[float, float, float, float]
+    centroid_wgs84: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class AnalysisSummary:
     """Scene-level figures.
+
+    Three quantities are reported and they are not interchangeable:
+
+    - `analyzed_area_m2` - the ground examined: the imagery footprint, clipped
+      to the boundary if one was given, with nodata excluded.
+    - `total_canopy_area_m2` - the detected crown area: the ground covered by
+      crowns within that region.
+    - `canopy_coverage_pct` - the first as a percentage of the second,
+      `detected crown area / analysed area * 100`.
+
+    The boundary's own area is *not* the analysed area and is reported on
+    `AnalysisResult.boundary` instead - see `BoundarySummary`.
 
     `total_canopy_area` is the area of the *union* of crown polygons clipped to
     the analysed region, not the sum of their areas. Overlapping crowns would
@@ -161,6 +208,7 @@ class AnalysisResult:
     excluded_by_boundary: int
     boundary_applied: bool
     boundary_wgs84: BaseGeometry | None
+    boundary: BoundarySummary | None
     elapsed_seconds: float
     warnings: list[str]
 
@@ -231,7 +279,10 @@ def analyze_image(
                 "physical scale can be derived from it.",
             )
 
-    boundary_source = _load_boundary_in_source_crs(boundary_path, source_crs, info)
+    prepared_boundary = _prepare_boundary(
+        boundary_path, source_crs, metric_crs, info, warnings
+    )
+    boundary_source = prepared_boundary.geometry if prepared_boundary else None
 
     effective_min_px = _minimum_area_in_pixels(
         min_crown_area_m2=min_crown_area_m2,
@@ -289,8 +340,10 @@ def analyze_image(
     )
 
     boundary_wgs84 = None
-    if boundary_source is not None and source_crs is not None:
-        boundary_wgs84 = geo.to_crs(boundary_source, source_crs, geo.WGS84)
+    if prepared_boundary is not None:
+        boundary_wgs84 = geo.to_crs(
+            prepared_boundary.loaded.geometry, prepared_boundary.loaded.crs, geo.WGS84
+        )
 
     return AnalysisResult(
         crowns=crowns,
@@ -309,8 +362,9 @@ def analyze_image(
         raw_detections=raw_count,
         duplicates_removed=duplicates_removed,
         excluded_by_boundary=excluded_by_boundary,
-        boundary_applied=boundary_source is not None,
+        boundary_applied=prepared_boundary is not None,
         boundary_wgs84=boundary_wgs84,
+        boundary=prepared_boundary.summary if prepared_boundary else None,
         elapsed_seconds=round(time.perf_counter() - started, 3),
         warnings=warnings,
     )
@@ -319,16 +373,31 @@ def analyze_image(
 # --- pipeline stages -----------------------------------------------------
 
 
-def _load_boundary_in_source_crs(
+@dataclass(frozen=True)
+class _PreparedBoundary:
+    """A loaded boundary placed against the imagery it will clip."""
+
+    geometry: BaseGeometry  # in the raster's own CRS
+    loaded: LoadedBoundary
+    summary: BoundarySummary
+
+
+def _prepare_boundary(
     boundary_path: str | Path | None,
     source_crs: CRS | None,
+    metric_crs: CRS | None,
     info: raster.RasterInfo,
-) -> BaseGeometry | None:
-    """Read a boundary and move it into the raster's CRS.
+    warnings: list[str],
+) -> _PreparedBoundary | None:
+    """Read a boundary, move it into the raster's CRS, and measure it.
 
     Reprojecting the boundary into the imagery's CRS - rather than the imagery
     into the boundary's - means the raster is never resampled, so no pixel
     values are altered before detection.
+
+    The boundary is measured here, in the same metric CRS the imagery is
+    measured in, so that "boundary area" and "analysed area" are comparable
+    figures rather than two numbers from two projections.
     """
     if boundary_path is None:
         return None
@@ -341,25 +410,67 @@ def _load_boundary_in_source_crs(
             detail={"file": Path(boundary_path).name},
         )
 
-    geometry, boundary_crs = load_boundary(Path(boundary_path))
-    in_source = geo.all_polygons(geo.to_crs(geometry, boundary_crs, source_crs))
+    loaded = load_boundary(Path(boundary_path))
+    warnings.extend(loaded.warnings)
+
+    in_source = geo.all_polygons(geo.to_crs(loaded.geometry, loaded.crs, source_crs))
     if in_source is None:
         raise InvalidBoundaryError(
             "The boundary has no usable area after being reprojected into the "
             "imagery's coordinate system.",
+            detail={"boundary_crs": _crs_label(loaded.crs), "imagery_crs": _crs_label(source_crs)},
         )
 
     footprint = geo.raster_footprint(info.width, info.height, info.transform)
-    if not in_source.intersects(footprint):
+    overlap = in_source.intersection(footprint)
+    if overlap.is_empty or overlap.area <= 0:
+        in_wgs84 = geo.to_crs(loaded.geometry, loaded.crs, geo.WGS84)
+        footprint_wgs84 = geo.to_crs(footprint, source_crs, geo.WGS84)
         raise InvalidBoundaryError(
-            "The boundary does not overlap the imagery at all. Check that the "
-            "KML covers the same area as the image you uploaded.",
+            "The boundary does not overlap the imagery at all, so there would "
+            "be nothing to analyse. Check that the boundary file covers the "
+            "same ground as the image you uploaded.",
             detail={
-                "boundary_bounds_wgs84": list(geometry.bounds),
-                "imagery_bounds": list(footprint.bounds),
+                "boundary_bounds_wgs84": [round(v, 6) for v in in_wgs84.bounds],
+                "imagery_bounds_wgs84": [round(v, 6) for v in footprint_wgs84.bounds],
             },
         )
-    return in_source
+
+    measurement = measure_boundary(loaded, metric_crs)
+    within_m2 = geo.area_m2(overlap, source_crs, metric_crs) if metric_crs else 0.0
+    covers_pct = (within_m2 / measurement.area_m2 * 100.0) if measurement.area_m2 else 0.0
+
+    parts = list(getattr(in_source, "geoms", [in_source]))
+    intersecting = sum(1 for part in parts if part.intersects(footprint))
+    if intersecting < len(parts):
+        warnings.append(
+            f"{len(parts) - intersecting} of the boundary's {len(parts)} parts "
+            "lie entirely outside the imagery and contribute no analysed area."
+        )
+
+    # A boundary wider than the picture is a normal thing to upload and not an
+    # error - but the result then describes the overlap, not the stand, and the
+    # user has to be told which one they are looking at.
+    if covers_pct < 99.5:
+        warnings.append(
+            f"The imagery covers {covers_pct:.1f}% of the boundary "
+            f"({within_m2:,.0f} m2 of {measurement.area_m2:,.0f} m2). Results "
+            "describe only the part of the boundary the image reaches."
+        )
+
+    summary = BoundarySummary(
+        area_m2=round(measurement.area_m2, 2),
+        area_within_imagery_m2=round(within_m2, 2),
+        imagery_covers_pct=round(covers_pct, 2),
+        part_count=measurement.part_count,
+        parts_intersecting_imagery=intersecting,
+        has_holes=measurement.has_holes,
+        source_format=measurement.source_format,
+        measurement_crs=measurement.measurement_crs,
+        bounds_wgs84=measurement.bounds_wgs84,
+        centroid_wgs84=measurement.centroid_wgs84,
+    )
+    return _PreparedBoundary(geometry=in_source, loaded=loaded, summary=summary)
 
 
 def _minimum_area_in_pixels(
@@ -451,7 +562,12 @@ def _build_crowns(
             area = geo.area_m2(geometry_crs, source_crs, metric_crs)
             if min_crown_area_m2 and area < min_crown_area_m2:
                 continue
-            if boundary_source is not None and not boundary_source.contains(geometry_crs.centroid):
+            # A crown belongs to the boundary when its centre does. Requiring
+            # the whole polygon to be inside would drop every tree on the
+            # forest edge; accepting any overlap would pull in trees that are
+            # mostly outside it. `covers` rather than `contains` so a centroid
+            # falling exactly on the line counts as inside.
+            if boundary_source is not None and not boundary_source.covers(geometry_crs.centroid):
                 excluded_by_boundary += 1
                 continue
 

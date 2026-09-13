@@ -150,16 +150,47 @@ def _metadata(result: AnalysisResult) -> dict:
         "confidence_threshold": result.confidence_threshold,
         "min_crown_area_m2": result.min_crown_area_m2,
         "boundary_applied": result.boundary_applied,
+        "boundary": _boundary_metadata(result),
         "tree_count": summary.tree_count,
+        # The three areas are named apart on purpose. `analyzed_area_m2` is the
+        # ground examined and is the denominator of coverage;
+        # `total_canopy_area_m2` is the ground under crowns; the boundary's own
+        # area lives in the `boundary` block above and is none of the others.
         "total_canopy_area_m2": summary.total_canopy_area_m2,
+        "sum_crown_area_m2": summary.sum_crown_area_m2,
         "analyzed_area_m2": summary.analyzed_area_m2,
         "canopy_coverage_pct": summary.canopy_coverage_pct,
+        "coverage_basis": summary.coverage_basis,
         "warnings": result.warnings,
         "disclaimer": (
             "Crown detections are estimated from imagery by an automated "
             "model. They have not been validated against ground survey and "
             "are not a field-verified tree inventory."
         ),
+    }
+
+
+def _boundary_metadata(result: AnalysisResult) -> dict | None:
+    """The boundary's own figures, kept distinct from the scene's.
+
+    The boundary area is what the user drew. The analysed area is the part of
+    it the imagery reaches, minus nodata. Someone reading this file months
+    later should not have to guess which of the two a number refers to.
+    """
+    boundary = result.boundary
+    if boundary is None:
+        return None
+    return {
+        "source_format": boundary.source_format,
+        "part_count": boundary.part_count,
+        "parts_intersecting_imagery": boundary.parts_intersecting_imagery,
+        "has_holes": boundary.has_holes,
+        "area_m2": boundary.area_m2,
+        "area_within_imagery_m2": boundary.area_within_imagery_m2,
+        "imagery_covers_pct": boundary.imagery_covers_pct,
+        "measurement_crs": boundary.measurement_crs,
+        "bounds_wgs84": list(boundary.bounds_wgs84),
+        "detections_excluded": result.excluded_by_boundary,
     }
 
 
@@ -186,10 +217,15 @@ def _provenance_lines(result: AnalysisResult) -> list[str]:
             "Source image is NOT georeferenced: area_m2 and centroid_lon/lat "
             "are empty, and only pixel measurements are available."
         )
-    if result.boundary_applied:
+    if result.boundary is not None:
+        boundary = result.boundary
         lines.append(
-            f"A boundary was applied; {result.excluded_by_boundary} detection(s) "
-            "outside it were excluded."
+            f"Boundary: {boundary.source_format}, {boundary.part_count} part(s), "
+            f"{boundary.area_m2} m2 enclosed "
+            f"({boundary.imagery_covers_pct}% of it covered by the imagery)."
+        )
+        lines.append(
+            f"{result.excluded_by_boundary} detection(s) outside the boundary were excluded."
         )
     for warning in result.warnings:
         lines.append(f"Warning: {warning}")
