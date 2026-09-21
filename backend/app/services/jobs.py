@@ -54,7 +54,7 @@ from .analysis import AnalysisResult
 
 log = logging.getLogger(__name__)
 
-JobStatus = Literal["queued", "running", "completed", "failed"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 MAX_JOBS = 50
 """How many jobs to remember.
@@ -95,13 +95,39 @@ CREATE TABLE IF NOT EXISTS jobs (
     parameters   TEXT NOT NULL,
     error        TEXT,
     result       BLOB,
-    app_version  TEXT NOT NULL
+    app_version  TEXT NOT NULL,
+    cancel_requested INTEGER NOT NULL DEFAULT 0
 )
+"""
+
+MIGRATIONS = (
+    "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+)
+"""Statements that bring an older file up to the current schema.
+
+Each one is run and its "duplicate column" complaint ignored, which is the
+whole of the migration story a table this small needs. The alternative - a
+version table and a runner to read it - is more moving parts than the thing
+being migrated.
 """
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _cancelled_error() -> JobError:
+    """Why there is no result, in the same shape as every other failure.
+
+    Carried on the job so that asking for the result of a cancelled analysis
+    is answered with what happened to it, rather than with the generic "not
+    finished" that would be true of one still running.
+    """
+    return JobError(
+        code="cancelled",
+        message="This analysis was cancelled before it finished, so there is no result.",
+        status_code=409,
+    )
 
 
 @dataclass
@@ -131,6 +157,13 @@ class Job:
     status: JobStatus = "queued"
     stage: str = "queued"
     progress: float = 0.0
+    cancel_requested: bool = False
+    """Somebody has asked for this analysis to stop.
+
+    Separate from the status, because asking is not the same as having
+    stopped. A running analysis notices at its next checkpoint, which is one
+    tile away; until then the job is still honestly "running".
+    """
     created_at: datetime = field(default_factory=_now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -152,7 +185,7 @@ class Job:
 
     @property
     def is_finished(self) -> bool:
-        return self.status in ("completed", "failed")
+        return self.status in ("completed", "failed", "cancelled")
 
 
 class JobStore:
@@ -190,6 +223,11 @@ class JobStore:
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA busy_timeout=5000")
             db.execute(SCHEMA)
+            for statement in MIGRATIONS:
+                try:
+                    db.execute(statement)
+                except sqlite3.OperationalError:
+                    pass  # already applied; the column is there
             db.commit()
         except (sqlite3.Error, OSError) as error:
             log.warning("Jobs will not survive a restart: could not open %s (%s)", path, error)
@@ -250,7 +288,7 @@ class JobStore:
             self._db.execute(
                 "INSERT OR REPLACE INTO jobs (id, created_at, started_at, finished_at, "
                 "status, stage, progress, image_name, boundary_name, parameters, error, "
-                "result, app_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "result, app_version, cancel_requested) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     job.id,
                     job.created_at.isoformat(),
@@ -265,6 +303,7 @@ class JobStore:
                     json.dumps(vars(job.error)) if job.error else None,
                     pickle.dumps(job.result, protocol=PICKLE_PROTOCOL) if job.result else None,
                     __version__,
+                    int(job.cancel_requested),
                 ),
             )
             self._db.commit()
@@ -280,8 +319,8 @@ class JobStore:
         try:
             row = self._db.execute(
                 "SELECT created_at, started_at, finished_at, status, stage, progress, "
-                "image_name, boundary_name, parameters, error, result, app_version "
-                "FROM jobs WHERE id = ?",
+                "image_name, boundary_name, parameters, error, result, app_version, "
+                "cancel_requested FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
         except sqlite3.Error as error:
@@ -302,6 +341,7 @@ class JobStore:
             started_at=datetime.fromisoformat(row[1]) if row[1] else None,
             finished_at=datetime.fromisoformat(row[2]) if row[2] else None,
             error=JobError(**json.loads(row[9])) if row[9] else None,
+            cancel_requested=bool(row[12]),
         )
         job.result = self._unpickle(job_id, row[10], row[11])
         if job.status == "completed" and job.result is None:
@@ -363,15 +403,94 @@ class JobStore:
             job = self._jobs.get(job_id)
             return job if job is not None else self._restore_locked(job_id)
 
-    def mark_running(self, job_id: str) -> None:
+    def mark_running(self, job_id: str) -> bool:
+        """Start the clock, unless the job is already over.
+
+        Returns whether the caller should go on to do the work. A job
+        cancelled while it waited in the queue is already finished by the time
+        a thread picks it up, and must not be dragged back to "running".
+        """
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
-                return
+            if job is None or job.is_finished:
+                return False
             job.status = "running"
             job.stage = "starting"
             job.started_at = _now()
             self._record_locked(job)
+            return True
+
+    def request_cancel(self, job_id: str) -> Job | None:
+        """Ask for a job to stop. Returns it as it stands, or None if unknown.
+
+        A job still queued is finished here and now: no thread has picked it
+        up, so there is nothing to wait for and nothing to interrupt. A running
+        one is only flagged - it is still honestly running until it reaches a
+        checkpoint and stops.
+
+        A job another worker is running is not in this process's memory, so the
+        flag is written to the file instead and that worker reads it at its
+        next checkpoint.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return self._request_cancel_on_record_locked(job_id)
+            if job.is_finished:
+                return job
+            job.cancel_requested = True
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.stage = "cancelled"
+                job.finished_at = _now()
+                job.error = _cancelled_error()
+            self._record_locked(job)
+            return job
+
+    def _request_cancel_on_record_locked(self, job_id: str) -> Job | None:
+        job = self._restore_locked(job_id)
+        if job is None or job.is_finished:
+            return job
+        job.cancel_requested = True
+        self._record_locked(job)
+        return job
+
+    def cancel_requested(self, job_id: str) -> bool:
+        """Whether this analysis has been asked to stop.
+
+        Checked by the thread doing the work, so it reads the file when the
+        flag is not already set here: the request may have arrived at a
+        different worker than the one running the job.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and job.cancel_requested:
+                return True
+            if self._db is None:
+                return False
+            try:
+                row = self._db.execute(
+                    "SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+            except sqlite3.Error:
+                return False
+            if row is None or not row[0]:
+                return False
+            if job is not None:
+                job.cancel_requested = True
+            return True
+
+    def mark_cancelled(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "cancelled"
+            job.stage = "cancelled"
+            job.error = _cancelled_error()
+            job.finished_at = _now()
+            self._record_locked(job)
+        log.info("Job %s cancelled", job_id)
 
     def update_progress(self, job_id: str, stage: str, progress: float) -> None:
         with self._lock:

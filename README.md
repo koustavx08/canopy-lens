@@ -769,6 +769,10 @@ disk; anything else is read from the file.
   refusing to start.
 - **At most 50 jobs are remembered**, oldest finished first, in memory and in
   the file alike. Work still running is never evicted to make room.
+- **An analysis can be stopped.** `POST /api/jobs/{id}/cancel` finishes a job
+  that is still queued outright, and asks a running one to stop; it does, at
+  its next tile. The endpoint answers with the job as it stands, which may
+  still say `running`, because that is the truth until the checkpoint arrives.
 - **At most `CANOPYLENS_MAX_CONCURRENT_ANALYSES` run at once** (default 2).
   Detection saturates a core, so starting every upload at once finishes none of
   them sooner; it only slows all of them and leaves no thread to answer the

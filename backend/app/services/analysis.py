@@ -75,6 +75,24 @@ range because it is the only stage whose length depends on the image.
 
 _DETECTION_BAND = (0.15, 0.85)
 
+StopCheck = Callable[[], bool]
+"""Asked, at each checkpoint, whether the analysis should give up.
+
+Separate from `on_progress` rather than folded into it. A progress reporter is
+allowed to fail without consequence - its exceptions are swallowed, because a
+broken progress bar must not lose an analysis that is succeeding - and a stop
+signal that travelled the same path would be swallowed with them.
+"""
+
+
+class AnalysisCancelled(Exception):
+    """Raised at a checkpoint when the analysis has been asked to stop.
+
+    Not a `CanopyLensError`: nothing went wrong, and it is not an answer to
+    give an HTTP caller. The job that asked for the work records that it was
+    cancelled and there is nothing else to report.
+    """
+
 
 @dataclass(frozen=True)
 class Crown:
@@ -247,6 +265,7 @@ def analyze_image(
     max_pixels_without_tiling: int = 4_000_000,
     iou_threshold: float = DEFAULT_IOU_THRESHOLD,
     on_progress: ProgressCallback | None = None,
+    should_stop: StopCheck | None = None,
     source_name: str | None = None,
 ) -> AnalysisResult:
     """Detect and measure tree crowns in an image.
@@ -268,8 +287,11 @@ def analyze_image(
         on_progress: Optional `(stage, fraction)` callback. Exceptions raised by
             it are swallowed: a progress reporter must never be able to fail an
             analysis that is otherwise succeeding.
+        should_stop: Optional predicate consulted at each checkpoint, and once
+            per tile. Returning True abandons the analysis at that point.
 
     Raises:
+        AnalysisCancelled: `should_stop` asked for the work to end.
         UnsupportedFileError, InvalidRasterError: the imagery cannot be read.
         EngineUnavailableError: no detector can run in this process.
         MissingGeoreferenceError: a boundary was supplied for imagery that is
@@ -279,6 +301,7 @@ def analyze_image(
     """
     started = time.perf_counter()
     image_path = Path(image_path)
+    _stop_if_asked(should_stop)
     _report(on_progress, "reading", 0.02)
 
     info = raster.describe(image_path)
@@ -329,6 +352,7 @@ def analyze_image(
         iou_threshold=iou_threshold,
     )
 
+    _stop_if_asked(should_stop)
     _report(on_progress, "detecting", _DETECTION_BAND[0])
     detections, tiles_processed = _detect_all_tiles(
         info,
@@ -339,6 +363,7 @@ def analyze_image(
         max_pixels_without_tiling,
         warnings,
         on_progress=on_progress,
+        should_stop=should_stop,
     )
     raw_count = len(detections)
 
@@ -355,6 +380,7 @@ def analyze_image(
     kept = suppress(candidates, iou_threshold=iou_threshold)
     duplicates_removed = len(candidates) - len(kept)
 
+    _stop_if_asked(should_stop)
     _report(on_progress, "measuring", _DETECTION_BAND[1])
     crowns, excluded_by_boundary = _build_crowns(
         kept,
@@ -544,6 +570,7 @@ def _detect_all_tiles(
     max_pixels_without_tiling: int,
     warnings: list[str],
     on_progress: ProgressCallback | None = None,
+    should_stop: StopCheck | None = None,
 ) -> tuple[list[CrownDetection], int]:
     """Run the engine over every tile, returning detections in raster pixel space."""
     windows = raster.plan_tiling(info, tile_size, tile_overlap, max_pixels_without_tiling)
@@ -552,6 +579,11 @@ def _detect_all_tiles(
 
     with rasterio.open(info.path) as src:
         for index, window in enumerate(windows, start=1):
+            # Checked once per tile: the tile is the unit of work here, so this
+            # is the finest granularity at which stopping is possible, and on a
+            # large mosaic it is the difference between a cancel that lands in
+            # a second and one that lands in several minutes.
+            _stop_if_asked(should_stop)
             image = raster.read_rgb_window(src, window, warnings)
             if image.size == 0:
                 continue
@@ -571,6 +603,24 @@ def _detect_all_tiles(
                 )
 
     return detections, len(windows)
+
+
+def _stop_if_asked(should_stop: StopCheck | None) -> None:
+    """Abandon the analysis if the caller has asked for it to end.
+
+    A failure to answer is taken as "carry on". Whatever went wrong with the
+    check, throwing away work in progress is the more expensive way to be
+    wrong about it.
+    """
+    if should_stop is None:
+        return
+    try:
+        asked = should_stop()
+    except Exception:  # pragma: no cover - defensive
+        log.warning("Cancellation check failed; continuing", exc_info=True)
+        return
+    if asked:
+        raise AnalysisCancelled
 
 
 def _report(on_progress: ProgressCallback | None, stage: str, fraction: float) -> None:

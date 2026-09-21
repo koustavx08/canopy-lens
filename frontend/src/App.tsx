@@ -30,7 +30,7 @@ export default function App() {
   });
 
   const analysis = useAnalysis();
-  const { run, reset } = analysis;
+  const { run, reset, cancel } = analysis;
 
   // Load server capabilities once; the defaults for the controls come from
   // there so the UI and the backend can never drift apart.
@@ -163,8 +163,8 @@ export default function App() {
 
   const handleCancel = useCallback(() => {
     setSelectedCrown(null);
-    reset();
-  }, [reset]);
+    void cancel();
+  }, [cancel]);
 
   return (
     <div className="flex h-full flex-col">

@@ -592,8 +592,6 @@ Listed so the gap is explicit rather than discovered:
 - A job store shared between hosts. The SQLite record survives a restart and is
   shared by every worker on one machine, but two machines have two files; that
   needs a database rather than a local file
-- Cancelling a running analysis. The browser can stop watching one, which
-  releases the page, but the work on the server runs to completion
 - Rendering the uploaded GeoTIFF itself in the browser. The map shows its crowns
   at their real position over a basemap; the pixel view is available only for
   formats the browser can decode

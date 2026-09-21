@@ -189,6 +189,20 @@ export function fetchJob(jobId: string, signal?: AbortSignal): Promise<JobStatus
   return request<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}`, { signal });
 }
 
+/**
+ * Ask the server to stop an analysis.
+ *
+ * Returns the job as it stands, which may still say "running": cancelling is a
+ * request the pipeline honours at its next checkpoint, not an instruction that
+ * takes effect the moment it is made.
+ */
+export function cancelAnalysis(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+  return request<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    signal,
+  });
+}
+
 export function fetchResult(jobId: string, signal?: AbortSignal): Promise<AnalysisResult> {
   return request<AnalysisResult>(`/api/results/${encodeURIComponent(jobId)}`, { signal });
 }

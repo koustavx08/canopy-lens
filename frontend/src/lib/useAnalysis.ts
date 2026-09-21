@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, fetchJob, fetchResult, startAnalysis } from "./api";
+import { ApiError, cancelAnalysis, fetchJob, fetchResult, startAnalysis } from "./api";
 import type {
   AnalysisPhase,
   AnalysisResult,
@@ -54,6 +54,30 @@ export function useAnalysis() {
   // A run in flight when the component goes away must not keep polling.
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  /**
+   * Stop the analysis, on the server as well as in the page.
+   *
+   * The server is told first and the page is released either way. A cancel
+   * that could not be delivered leaves the browser exactly where the old
+   * "stop watching" button left it, which is the worst case rather than a new
+   * one; blocking the button on a failed request would leave the user watching
+   * an analysis they have already said they do not want.
+   */
+  const cancel = useCallback(async () => {
+    const jobId = state.jobId;
+    if (jobId) {
+      try {
+        await cancelAnalysis(jobId);
+      } catch {
+        /* nothing useful to do: the page is being released regardless */
+      }
+    }
+    runRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setState(IDLE);
+  }, [state.jobId]);
+
   const reset = useCallback(() => {
     runRef.current += 1;
     abortRef.current?.abort();
@@ -89,6 +113,13 @@ export function useAnalysis() {
           put({ job: update, phase: phaseFor(update) }),
         );
         if (!current()) return;
+
+        if (job.status === "cancelled") {
+          // Somebody asked for this. There is nothing to report and nothing
+          // to show, so the page goes back to where it started.
+          setState(IDLE);
+          return;
+        }
 
         if (job.status === "failed") {
           // The job carries the failure's own code and message; asking for the
@@ -127,7 +158,7 @@ export function useAnalysis() {
     [],
   );
 
-  return { ...state, run, reset };
+  return { ...state, run, reset, cancel };
 }
 
 /** Poll until the job finishes, reporting every update on the way. */
@@ -142,6 +173,9 @@ async function poll(
     if (!current()) return job;
     onUpdate(job);
     if (job.status === "completed" || job.status === "failed") return job;
+    // A job cancelled elsewhere - another tab, or a restart that closed it
+    // out - is finished too, and polling it forever would never end.
+    if (job.status === "cancelled") return job;
     await sleep(POLL_INTERVAL_MS, signal);
   }
 }
@@ -161,6 +195,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 function phaseFor(job: JobStatus): AnalysisPhase {
+  if (job.status === "cancelled") return "idle";
   if (job.status === "failed") return "error";
   if (job.status === "completed") return "post-processing";
   return POST_PROCESSING_STAGES.has(job.stage) ? "post-processing" : "processing";

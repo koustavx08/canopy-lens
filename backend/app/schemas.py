@@ -130,7 +130,7 @@ class JobStatusResponse(BaseModel):
     """
 
     job_id: str
-    status: str = Field(description="queued, running, completed or failed.")
+    status: str = Field(description="queued, running, completed, failed or cancelled.")
     stage: str = Field(
         description=(
             "Which part of the pipeline is current: reading, detecting, "

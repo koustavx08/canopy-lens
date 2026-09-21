@@ -42,7 +42,7 @@ from ..errors import (
 )
 from ..schemas import ErrorResponse, JobAcceptedResponse, JobStatusResponse
 from ..services import raster
-from ..services.analysis import analyze_image
+from ..services.analysis import AnalysisCancelled, analyze_image
 from ..services.boundary import SUPPORTED_EXTENSIONS as BOUNDARY_EXTENSIONS
 from ..services.export import export_csv, export_geojson
 from ..services.jobs import Job, JobError, JobStore, get_job_store
@@ -230,6 +230,38 @@ def get_job(job_id: str, store: JobStore = Depends(get_job_store)) -> JobStatusR
     return JobStatusResponse(**job_status_payload(_require_job(store, job_id)))
 
 
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=JobStatusResponse,
+    summary="Stop an analysis that has not finished",
+    responses={
+        404: {"model": ErrorResponse, "description": "No such job"},
+        409: {"model": ErrorResponse, "description": "The job has already finished"},
+    },
+)
+def cancel_job(job_id: str, store: JobStore = Depends(get_job_store)) -> JobStatusResponse:
+    """Ask for an analysis to stop, and report where it has got to.
+
+    Cancelling is a request, not an instruction that takes effect at once. A
+    job still queued is finished here, because no thread has picked it up. A
+    running one is flagged and stops at its next checkpoint, one tile later -
+    so this may answer with the job still "running", which is the truth.
+
+    Asking twice is not an error. Asking about an analysis that has already
+    finished is, because there is nothing left to stop and answering "cancelled"
+    would misdescribe a result that exists.
+    """
+    job = store.request_cancel(job_id)
+    if job is None:
+        _require_job(store, job_id)  # raises the 404 with its own explanation
+    if job.status in ("completed", "failed"):
+        raise JobNotFinishedError(
+            f"This analysis has already {job.status}; there is nothing to cancel.",
+            detail={"job_id": job_id, "status": job.status},
+        )
+    return JobStatusResponse(**job_status_payload(job))
+
+
 @router.get(
     "/results/{job_id}",
     summary="The measured result of a completed job",
@@ -300,7 +332,11 @@ def _run_analysis(
     here may raise: an exception would be lost and the job would sit at
     "running" forever. Every outcome is written to the store.
     """
-    store.mark_running(job_id)
+    if not store.mark_running(job_id):
+        # Cancelled while it waited in the queue. The job is already finished;
+        # all that is left is the upload nobody will read.
+        _discard(image_path, boundary_path)
+        return
     try:
         result = analyze_image(
             image_path,
@@ -311,8 +347,13 @@ def _run_analysis(
             tile_size=parameters["tile_size"],
             tile_overlap=parameters["tile_overlap"],
             on_progress=lambda stage, fraction: store.update_progress(job_id, stage, fraction),
+            should_stop=lambda: store.cancel_requested(job_id),
             source_name=source_name,
         )
+    except AnalysisCancelled:
+        # Not a failure: somebody asked for this, and the job records that
+        # rather than a pipeline error that never happened.
+        store.mark_cancelled(job_id)
     except CanopyLensError as exc:
         # Already phrased for a user: it names what is wrong with the file or
         # the request, so it is passed through unchanged.
@@ -344,9 +385,13 @@ def _run_analysis(
         # The pipeline has read what it needs; the result lives in memory.
         # Keeping the upload would leave the disk filling with imagery nobody
         # will ask for again.
-        image_path.unlink(missing_ok=True)
-        if boundary_path is not None:
-            boundary_path.unlink(missing_ok=True)
+        _discard(image_path, boundary_path)
+
+
+def _discard(image_path: Path, boundary_path: Path | None) -> None:
+    image_path.unlink(missing_ok=True)
+    if boundary_path is not None:
+        boundary_path.unlink(missing_ok=True)
 
 
 # --- helpers --------------------------------------------------------------
@@ -373,7 +418,10 @@ def _require_completed(store: JobStore, job_id: str) -> Job:
     job = _require_job(store, job_id)
     if job.status == "completed":
         return job
-    if job.status == "failed" and job.error is not None:
+    # Cancelled jobs carry an error too, so that asking for the result of one
+    # is answered with what happened to it rather than with "not finished",
+    # which would be true of an analysis still running.
+    if job.error is not None:
         raise _restored(job.error)
     raise JobNotFinishedError(
         f"This analysis is {job.status}. Poll /api/jobs/{job_id} until its "

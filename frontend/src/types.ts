@@ -107,7 +107,7 @@ export interface JobAccepted {
 /** Where a job has got to. Carries no detections: it is polled every second. */
 export interface JobStatus {
   job_id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   stage: string;
   /** Fraction of tiles completed, not of time elapsed. */
   progress: number;

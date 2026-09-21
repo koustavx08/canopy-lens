@@ -196,7 +196,7 @@ export function Sidebar({
             className="mt-2 w-full rounded-md px-3 py-1.5 text-[12px] text-ink-muted hover:bg-surface-2 hover:text-ink"
             onClick={onCancel}
           >
-            Stop watching this analysis
+            Cancel this analysis
           </button>
         )}
 
