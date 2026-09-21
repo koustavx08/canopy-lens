@@ -16,6 +16,7 @@ from . import __version__
 from .config import Settings, get_settings
 from .errors import register_error_handlers
 from .logging_config import configure_logging
+from .observability import ObservabilityMiddleware
 from .routers import analysis, boundary, health
 from .schemas import HealthResponse
 from .security import RateLimitMiddleware, require_api_key
@@ -83,6 +84,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Added last, so it is the outermost layer and sees every request: one
+    # refused by the rate limiter is still a request, and an access log that
+    # cannot show the refusals is no help at all in explaining them.
+    app.add_middleware(ObservabilityMiddleware)
     register_error_handlers(app)
     # The probes and the capability report stay open: an orchestrator that has
     # to be given a key to ask whether the service is alive is one more secret

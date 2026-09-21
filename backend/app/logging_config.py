@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import sys
 
-_FORMAT = "%(asctime)s %(levelname)-8s %(name)s | %(message)s"
+from .observability import RequestIdFilter
+
+_FORMAT = "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s | %(message)s"
 _configured = False
 
 
@@ -33,6 +35,10 @@ def configure_logging(level: str = "INFO") -> None:
         return
     handler = logging.StreamHandler(_utf8_stdout())
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt="%H:%M:%S"))
+    # On the handler rather than on a logger: records reach it from every
+    # library in the process, and one without the attribute would fail the
+    # formatter while it was trying to report something else.
+    handler.addFilter(RequestIdFilter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level.upper())

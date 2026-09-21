@@ -560,6 +560,16 @@ class JobStore:
             except sqlite3.Error as error:
                 log.warning("Could not clear the job record: %s", error)
 
+    @property
+    def is_durable(self) -> bool:
+        """Whether jobs recorded here will outlive the process."""
+        return self._db is not None
+
+    def count_running(self) -> int:
+        """How many analyses this process is working on."""
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if job.status == "running")
+
     def close(self) -> None:
         with self._lock:
             if self._db is not None:

@@ -11,6 +11,27 @@ class HealthResponse(BaseModel):
     environment: str
 
 
+class ReadinessCheck(BaseModel):
+    name: str
+    ok: bool
+    detail: str = Field(description="What was checked, and what was found.")
+    critical: bool = Field(
+        description="Whether failing this check means the service cannot do its job."
+    )
+
+
+class ReadinessResponse(BaseModel):
+    status: str = Field(
+        description=(
+            "'ready' when every check passed, 'degraded' when only advisory ones "
+            "failed, 'not_ready' when the service cannot analyse anything."
+        )
+    )
+    version: str
+    environment: str
+    checks: list[ReadinessCheck]
+
+
 class DependencyStatus(BaseModel):
     module: str
     installed: bool

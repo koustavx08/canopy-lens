@@ -40,6 +40,7 @@ from ..errors import (
     QueueFullError,
     ResourceNotFoundError,
 )
+from ..observability import METRICS
 from ..schemas import ErrorResponse, JobAcceptedResponse, JobStatusResponse
 from ..services import raster
 from ..services.analysis import AnalysisCancelled, analyze_image
@@ -332,9 +333,12 @@ def _run_analysis(
     here may raise: an exception would be lost and the job would sit at
     "running" forever. Every outcome is written to the store.
     """
+    METRICS.analysis_started()
+    outcome = "failed"
     if not store.mark_running(job_id):
         # Cancelled while it waited in the queue. The job is already finished;
         # all that is left is the upload nobody will read.
+        METRICS.analysis_ended("cancelled")
         _discard(image_path, boundary_path)
         return
     try:
@@ -354,6 +358,7 @@ def _run_analysis(
         # Not a failure: somebody asked for this, and the job records that
         # rather than a pipeline error that never happened.
         store.mark_cancelled(job_id)
+        outcome = "cancelled"
     except CanopyLensError as exc:
         # Already phrased for a user: it names what is wrong with the file or
         # the request, so it is passed through unchanged.
@@ -381,7 +386,9 @@ def _run_analysis(
         )
     else:
         store.mark_completed(job_id, result)
+        outcome = "completed"
     finally:
+        METRICS.analysis_ended(outcome)
         # The pipeline has read what it needs; the result lives in memory.
         # Keeping the upload would leave the disk filling with imagery nobody
         # will ask for again.

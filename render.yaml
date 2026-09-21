@@ -19,7 +19,12 @@ services:
     dockerContext: .
     plan: starter
     region: oregon
-    healthCheckPath: /api/health
+    # Readiness rather than liveness: a deploy that came up without a
+    # writable data directory or without a usable detection engine is alive
+    # and cannot work, and it should not be allowed to replace the one that
+    # can. Degraded checks still answer 200, so an open API or a job record
+    # that could not be opened do not fail the deploy.
+    healthCheckPath: /api/health/ready
     # Jobs are recorded in a SQLite file in the instance's own filesystem (see
     # README, "Where jobs live"). Workers on one instance share it; a second
     # instance would have its own, and would answer polls for work it never

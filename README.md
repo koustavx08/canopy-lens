@@ -462,6 +462,41 @@ Set `CANOPYLENS_TRUSTED_PROXY_HOPS=1` wherever a proxy sits in front, or the
 rate limiter sees every request as coming from that proxy and counts the whole
 internet as one caller. Both `render.yaml` and `docker-compose.yml` set it.
 
+### Watching it run
+
+Three things make a deployed instance explicable, and none of them needs a
+dependency installed.
+
+**Request ids.** Every response carries `X-Request-ID`, and every log line the
+request produced carries the same value. An `X-Request-ID` supplied by a proxy
+in front is kept rather than replaced, so the two halves of a trace join up. A
+user reporting a failure can hand over one string that finds the exact lines.
+
+**An access log.** One line per request with its method, path, status and
+duration. The probes are logged at `DEBUG` so that an orchestrator polling
+every few seconds does not become most of the log.
+
+**Readiness, separately from liveness.** `/api/health` asks whether the process
+is alive, which is what an orchestrator restarts it for. `/api/health/ready`
+asks whether it can do the work, and names what failed:
+
+| Check | Critical | Fails when |
+| --- | --- | --- |
+| `data_directory_writable` | yes | The data directory rejects a test file — a full disk, or a volume that was not mounted |
+| `detection_engine` | yes | No engine reports itself available in this process |
+| `job_record` | no | The SQLite record could not be opened, so a restart will lose jobs |
+| `access_control` | no | `CANOPYLENS_API_KEYS` is unset outside a `development` environment |
+
+Only a critical failure answers 503. The other two are worth seeing and are not
+worth taking an instance out of rotation for: it can still analyse imagery, and
+a 503 there would turn a warning into an outage.
+
+**Counters** at `/api/metrics`, in the Prometheus text format: requests by
+method, route and status class; time spent per route; analyses by how they
+ended; and the number queued and running right now. The route label is the
+pattern — `/api/jobs/{job_id}` — not the URL, because one time series per
+analysis is how a server takes down its own monitoring.
+
 ### Either host, or neither
 
 Nothing here is specific to those two vendors. The API image takes `$PORT`, so
@@ -580,10 +615,13 @@ request and response shapes there are the ones the server actually enforces.
 | `GET /api/capabilities` | What this running process can actually do: installed dependency versions, per-engine availability with reasons, processing limits, detection defaults, supported formats |
 | `POST /api/analyze` | Upload imagery and an optional boundary, start an analysis, get a job id |
 | `GET /api/jobs/{job_id}` | Status, stage and progress of that job |
+| `POST /api/jobs/{job_id}/cancel` | Stop an analysis that has not finished |
 | `GET /api/results/{job_id}` | The measured result once the job has completed |
 | `GET /api/results/{job_id}/csv` | The crowns as CSV, as a browser download |
 | `GET /api/results/{job_id}/geojson` | The crowns as GeoJSON, as a browser download |
 | `POST /api/boundary/preview` | Parse a KML, KMZ or GeoJSON boundary and return it as WGS84 geometry plus its measured area |
+| `GET /api/health/ready` | Readiness: whether this instance can actually do the work, and which check failed if not |
+| `GET /api/metrics` | Counters in the Prometheus text format. Requires the API key when one is configured |
 | `GET /docs` | Interactive OpenAPI documentation |
 
 ### Running an analysis
