@@ -34,7 +34,12 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import Response
 
 from ..config import Settings, get_settings
-from ..errors import CanopyLensError, InvalidParameterError, ResourceNotFoundError
+from ..errors import (
+    CanopyLensError,
+    InvalidParameterError,
+    QueueFullError,
+    ResourceNotFoundError,
+)
 from ..schemas import ErrorResponse, JobAcceptedResponse, JobStatusResponse
 from ..services import raster
 from ..services.analysis import analyze_image
@@ -83,6 +88,24 @@ def shutdown_analysis_pool() -> None:
 atexit.register(shutdown_analysis_pool)
 
 
+def _refuse_if_the_queue_is_full(store: JobStore, settings: Settings) -> None:
+    """Say no before the upload is read, not after.
+
+    Checked first thing, so a refused submission never costs the server the
+    time and disk of receiving an image it was not going to analyse. The count
+    can be stale by the time the job is created - another request may take the
+    last place in between - but the limit is a backstop against a growing
+    backlog, not an exact quota, and being one over it briefly costs nothing.
+    """
+    waiting = store.count_queued()
+    if waiting >= settings.max_queued_analyses:
+        raise QueueFullError(
+            f"{waiting} analyses are already waiting to start. Try again once "
+            "the server has worked through them.",
+            detail={"queued": waiting, "limit": settings.max_queued_analyses},
+        )
+
+
 MAX_MIN_CROWN_AREA_M2 = 100_000.0
 """Upper bound on the crown-area filter: ten hectares, which is not a crown.
 
@@ -127,6 +150,7 @@ def start_analysis(
     an oversized file or an unknown engine is answered immediately rather than
     becoming a job that exists only to fail.
     """
+    _refuse_if_the_queue_is_full(store, settings)
     resolved_engine = _validate_engine(engine if engine is not None else settings.default_engine)
     confidence = (
         settings.default_confidence if confidence_threshold is None else confidence_threshold

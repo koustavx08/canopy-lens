@@ -80,6 +80,29 @@ class PayloadTooLargeError(CanopyLensError):
     code = "payload_too_large"
 
 
+class UnauthorizedError(CanopyLensError):
+    status_code = 401
+    code = "unauthorized"
+
+
+class RateLimitedError(CanopyLensError):
+    status_code = 429
+    code = "rate_limited"
+
+
+class QueueFullError(CanopyLensError):
+    """More analyses are already waiting than the server will hold.
+
+    Distinct from `rate_limited`, which is about how fast one caller is
+    asking. This is about how much work the server has already accepted: the
+    request rate can be perfectly reasonable and the queue still be full
+    because detection is slower than submission.
+    """
+
+    status_code = 429
+    code = "queue_full"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(CanopyLensError)
     async def _handle_app_error(_: Request, exc: CanopyLensError) -> JSONResponse:
@@ -145,7 +168,13 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
-_HTTP_CODES = {404: "not_found", 405: "method_not_allowed", 413: "payload_too_large"}
+_HTTP_CODES = {
+    401: "unauthorized",
+    404: "not_found",
+    405: "method_not_allowed",
+    413: "payload_too_large",
+    429: "rate_limited",
+}
 
 
 def _validation_message(exc: RequestValidationError) -> str:

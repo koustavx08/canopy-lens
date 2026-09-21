@@ -43,3 +43,17 @@ services:
       # and leave nothing to answer the health check with. Raise it with the plan.
       - key: CANOPYLENS_MAX_CONCURRENT_ANALYSES
         value: "1"
+      # One analysis at a time on this plan, so a queue much longer than this
+      # is a queue nobody is still waiting on. Callers past it are told so.
+      - key: CANOPYLENS_MAX_QUEUED_ANALYSES
+        value: "10"
+      # Keys accepted by this deployment, comma-separated. Set it in the Render
+      # dashboard and give the same value to the frontend build as VITE_API_KEY.
+      # Left unset the API is open to anyone who finds the URL, and the
+      # readiness probe reports it as degraded for exactly that reason.
+      - key: CANOPYLENS_API_KEYS
+        sync: false
+      # Render's router terminates TLS in front of the container and appends
+      # the caller's address to X-Forwarded-For. One hop.
+      - key: CANOPYLENS_TRUSTED_PROXY_HOPS
+        value: "1"

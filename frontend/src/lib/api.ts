@@ -10,6 +10,22 @@ import type { ApiErrorBody, BoundaryPreview, Capabilities } from "../types";
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
+/**
+ * The key this build sends, when the backend it talks to asks for one.
+ *
+ * Compiled into the bundle, so it is readable by anyone who opens the page.
+ * That is not a flaw in how it is stored here - a browser has nowhere to keep
+ * a secret from its own user - it is what a key of this kind is for: it keeps
+ * a public address from being usable by anything that has not been handed the
+ * build, which stops drive-by traffic and costs an attacker one view-source.
+ * An instance holding data worth protecting wants a real session, not this.
+ */
+const API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
+
+function authHeaders(): Record<string, string> {
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
+}
+
 export class ApiError extends Error {
   readonly code: string;
   readonly detail: Record<string, unknown>;
@@ -31,7 +47,10 @@ export function apiUrl(path: string): string {
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(apiUrl(path), init);
+    response = await fetch(apiUrl(path), {
+      ...init,
+      headers: { ...authHeaders(), ...((init?.headers as Record<string, string>) ?? {}) },
+    });
   } catch (cause) {
     throw new ApiError(
       {
@@ -115,6 +134,7 @@ export function startAnalysis(
     const xhr = new XMLHttpRequest();
     xhr.open("POST", apiUrl("/api/analyze"));
     xhr.responseType = "text";
+    for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) options.onUploadProgress?.(event.loaded / event.total);
@@ -184,7 +204,7 @@ export async function downloadExport(jobId: string, kind: "csv" | "geojson"): Pr
   const path = `/api/results/${encodeURIComponent(jobId)}/${kind}`;
   let response: Response;
   try {
-    response = await fetch(apiUrl(path));
+    response = await fetch(apiUrl(path), { headers: authHeaders() });
   } catch (cause) {
     throw new ApiError(
       { code: "network_unreachable", message: "Could not reach the backend.", detail: { cause: String(cause) } },

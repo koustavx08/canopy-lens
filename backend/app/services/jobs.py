@@ -166,6 +166,16 @@ class JobStore:
             job.finished_at = datetime.now(timezone.utc)
         log.info("Job %s failed: %s - %s", job_id, error.code, error.message)
 
+    def count_queued(self) -> int:
+        """How many jobs are accepted but not yet started.
+
+        Read before accepting another: the queue is the part of the backlog
+        nobody is working on yet, and it is the part that can grow without
+        bound while the pool works through what it already has.
+        """
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if job.status == "queued")
+
     def clear(self) -> None:
         """Forget every job. Used by tests to keep one case out of another's way."""
         with self._lock:

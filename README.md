@@ -432,13 +432,35 @@ before it finishes. Raise it with the plan.
 1. **Add New → Project**, import this repository, accept the settings — the
    build command, output directory, SPA rewrite and cache headers all come from
    `vercel.json`.
-2. Set one environment variable, **`VITE_API_BASE_URL`**, to the Render URL
-   (`https://canopylens-api.onrender.com`, no trailing slash), and deploy.
+2. Set **`VITE_API_BASE_URL`** to the Render URL
+   (`https://canopylens-api.onrender.com`, no trailing slash). If the API has
+   `CANOPYLENS_API_KEYS` set, set **`VITE_API_KEY`** to one of those keys too.
+   Then deploy.
 
 `VITE_*` values are compiled into the bundle, so a change to that variable needs
 a redeploy, not just a restart. The two origins differ, which is exactly why the
 API's `CANOPYLENS_CORS_ORIGINS` has to name the Vercel domain: a deployment
 where `curl` works and the browser does not is almost always this.
+
+### Closing the door
+
+A deployed API is reachable by anyone who finds the URL, and an analysis costs
+real CPU. Three limits guard it, each answering a different question:
+
+| Setting | Question it answers |
+| --- | --- |
+| `CANOPYLENS_API_KEYS` | May this caller use the service at all? |
+| `CANOPYLENS_RATE_LIMIT_PER_MINUTE` | Is this caller asking faster than it should? |
+| `CANOPYLENS_MAX_QUEUED_ANALYSES` | Has the server already accepted more work than it can get to? |
+
+All three are off or generous by default, because a laptop running `uvicorn` for
+the afternoon should not need credentials. Set the key on anything public. The
+browser key is compiled into the bundle and therefore readable by anyone who
+opens the page: it stops drive-by traffic, and it is not a login.
+
+Set `CANOPYLENS_TRUSTED_PROXY_HOPS=1` wherever a proxy sits in front, or the
+rate limiter sees every request as coming from that proxy and counts the whole
+internet as one caller. Both `render.yaml` and `docker-compose.yml` set it.
 
 ### Either host, or neither
 
@@ -476,6 +498,10 @@ unset. Full annotated list: [`.env.example`](.env.example).
 | `CANOPYLENS_DATA_DIR` | `backend/.data` | Where uploads and results are written; relative paths resolve from the repo root |
 | `CANOPYLENS_MAX_UPLOAD_MB` | `512` | Per-file imagery upload limit; larger requests get HTTP 413 |
 | `CANOPYLENS_MAX_CONCURRENT_ANALYSES` | `2` | How many analyses run at once; the rest wait as `queued` |
+| `CANOPYLENS_MAX_QUEUED_ANALYSES` | `20` | How long the queue may get before submissions are refused with `queue_full` |
+| `CANOPYLENS_API_KEYS` | *(empty)* | Comma-separated keys accepted as `X-API-Key` or a bearer token. Empty means the API is open |
+| `CANOPYLENS_RATE_LIMIT_PER_MINUTE` | `600` | Requests per minute per caller, probes excepted. `0` disables it |
+| `CANOPYLENS_TRUSTED_PROXY_HOPS` | `0` | How many reverse proxies sit in front. `0` ignores `X-Forwarded-For`; `1` behind nginx or Render |
 | `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` | `32` | Separate, much lower limit for boundary files — a KML is text describing an outline, and the imagery allowance has no business applying to it |
 | `CANOPYLENS_TILE_SIZE` | `800` | Tile edge length in pixels |
 | `CANOPYLENS_TILE_OVERLAP` | `160` | Overlap between neighbouring tiles, in pixels |
@@ -489,6 +515,7 @@ unset. Full annotated list: [`.env.example`](.env.example).
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | *(empty)* | Base URL of the API. Leave empty in development and in the Docker stack, where `/api` is proxied on the same origin. Set it when the API is on another host, e.g. `https://canopylens-api.onrender.com` |
+| `VITE_API_KEY` | *(empty)* | Key sent as `X-API-Key`, when the API requires one. Compiled into the bundle and therefore readable by anyone who opens the page |
 | `VITE_PROXY_TARGET` | `http://127.0.0.1:8000` | Where the Vite dev server proxies `/api` (development only) |
 | `VITE_BASEMAP_STYLE_URL` | *(empty)* | Optional MapLibre style URL replacing the built-in key-free basemaps |
 

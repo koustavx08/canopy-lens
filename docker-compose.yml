@@ -19,6 +19,13 @@ services:
       CANOPYLENS_DATA_DIR: /app/backend/.data
       CANOPYLENS_MAX_UPLOAD_MB: ${CANOPYLENS_MAX_UPLOAD_MB:-512}
       CANOPYLENS_CORS_ORIGINS: ${CANOPYLENS_CORS_ORIGINS:-http://localhost:8080}
+      # The web container is the only thing in front of the API, and it appends
+      # the address it saw to X-Forwarded-For. One hop, so the rate limiter
+      # counts real callers rather than counting nginx as a single busy client.
+      CANOPYLENS_TRUSTED_PROXY_HOPS: "1"
+      # Empty by default: this stack is something you run on your own machine.
+      # Set a key in .env to exercise the guard the way a deployment will.
+      CANOPYLENS_API_KEYS: ${CANOPYLENS_API_KEYS:-}
     ports:
       - "8000:8000"
     volumes:

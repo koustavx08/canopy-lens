@@ -13,6 +13,14 @@ value is unknown.
 
 from __future__ import annotations
 
+import os
+
+# The suite polls a running job twenty times a second, which no interface does
+# and the rate limit is right to refuse. Disabled for the whole suite so that
+# every other module tests what it is about; the limiter itself is covered in
+# test_security.py, which configures its own.
+os.environ["CANOPYLENS_RATE_LIMIT_PER_MINUTE"] = "0"
+
 from pathlib import Path
 
 import numpy as np

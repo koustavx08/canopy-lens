@@ -18,6 +18,7 @@ from .errors import register_error_handlers
 from .logging_config import configure_logging
 from .routers import analysis, boundary, health
 from .schemas import HealthResponse
+from .security import RateLimitMiddleware, require_api_key
 from .services.uploads import discard_orphaned_uploads
 
 log = logging.getLogger("canopylens")
@@ -67,6 +68,12 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
+    # Added first so that CORS ends up outermost: Starlette wraps each new
+    # middleware around the ones already there, and a 429 produced inside the
+    # CORS layer is a response the browser is allowed to read. Refused outside
+    # it, the same 429 reaches the page as an opaque network failure, and the
+    # user is told the server is unreachable when it is merely busy.
+    app.add_middleware(RateLimitMiddleware, settings=settings)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
@@ -75,9 +82,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     register_error_handlers(app)
+    # The probes and the capability report stay open: an orchestrator that has
+    # to be given a key to ask whether the service is alive is one more secret
+    # to distribute, and neither endpoint discloses anything a caller could not
+    # learn by being refused.
     app.include_router(health.router, prefix="/api")
-    app.include_router(boundary.router, prefix="/api")
-    app.include_router(analysis.router, prefix="/api")
+    guarded = [Depends(require_api_key)]
+    app.include_router(boundary.router, prefix="/api", dependencies=guarded)
+    app.include_router(analysis.router, prefix="/api", dependencies=guarded)
 
     # Container orchestrators and uptime checks look for /health at the root,
     # and it costs one route to be found there as well as under /api.
