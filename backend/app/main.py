@@ -18,6 +18,7 @@ from .errors import register_error_handlers
 from .logging_config import configure_logging
 from .routers import analysis, boundary, health
 from .schemas import HealthResponse
+from .services.uploads import discard_orphaned_uploads
 
 log = logging.getLogger("canopylens")
 
@@ -37,12 +38,22 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
     settings.ensure_dirs()
+    # An analysis deletes its own upload when it finishes, so anything still in
+    # the directory at startup belongs to a run that was killed mid-flight -
+    # and the job that owned it died with the process. Left alone it is disk
+    # that nothing will ever free.
+    discarded = discard_orphaned_uploads(settings.upload_dir)
+    if discarded:
+        log.info("Removed %d orphaned upload(s) from a previous run", discarded)
     # Importing the engines package registers the detection engines.
     import canopylens_ml.engines  # noqa: F401
 
     log.info("CanopyLens API %s starting (environment=%s)", __version__, settings.environment)
     log.info("Data directory: %s", settings.data_dir)
     yield
+    # Stop the analysis pool before the process goes: a thread still waiting to
+    # start work would otherwise hold the interpreter open at exit.
+    analysis.shutdown_analysis_pool()
     log.info("CanopyLens API shutting down")
 
 

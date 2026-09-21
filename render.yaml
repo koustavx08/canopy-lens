@@ -1,0 +1,45 @@
+# CanopyLens API on Render
+# ---------------------------------------------------------------------------
+# Render reads this file from the repository root ("Blueprint" deploy):
+#
+#   1. New -> Blueprint, point it at this repo, apply.
+#   2. When the service is live, set CANOPYLENS_CORS_ORIGINS to the deployed
+#      frontend origin (see below) and redeploy.
+#
+# The image is backend/Dockerfile, built from the repository root because it
+# needs both `backend/` and `ml/`. The deep-learning extras are deliberately
+# left out of that image, so the deployed API offers the `classical` engine and
+# /api/capabilities says plainly that `deepforest` is not installed.
+# ---------------------------------------------------------------------------
+services:
+  - type: web
+    name: canopylens-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    # Jobs live in the memory of one process (see README, "Where jobs live"),
+    # so a second instance would answer polls for work it never ran.
+    numInstances: 1
+    envVars:
+      - key: CANOPYLENS_ENVIRONMENT
+        value: production
+      - key: CANOPYLENS_LOG_LEVEL
+        value: INFO
+      - key: CANOPYLENS_DATA_DIR
+        value: /app/backend/.data
+      # Browser origins allowed to call this API directly. Set it to the
+      # deployed frontend, e.g. https://canopylens.vercel.app - a wrong value
+      # here is the usual cause of a working curl and a failing browser.
+      - key: CANOPYLENS_CORS_ORIGINS
+        sync: false
+      # Render's starter plan has 512 MB of RAM; a raster far above this is
+      # more likely to exhaust memory than to finish. Raise it with the plan.
+      - key: CANOPYLENS_MAX_UPLOAD_MB
+        value: "128"
+      # Half a vCPU: a second concurrent analysis would halve the speed of both
+      # and leave nothing to answer the health check with. Raise it with the plan.
+      - key: CANOPYLENS_MAX_CONCURRENT_ANALYSES
+        value: "1"

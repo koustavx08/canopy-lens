@@ -6,10 +6,11 @@ used throughout the suite, so the figures the API returns can be checked
 against the geometry that was drawn rather than against a value recorded from
 an earlier run.
 
-Starlette's test client runs background tasks before the response is handed
-back, so a job submitted here is already finished by the time `post` returns.
-That makes the assertions deterministic; the intermediate states are exercised
-in `test_jobs.py`, where the store can be driven directly.
+Analyses run on a bounded pool, so a submission returns while the work is still
+in flight - exactly as it does in production. `await_job` polls until the job
+settles, which is what the browser does, and fails loudly rather than hanging if
+it never does. The intermediate states are exercised in `test_jobs.py`, where
+the store can be driven directly.
 """
 
 from __future__ import annotations
@@ -25,8 +26,10 @@ from fastapi.testclient import TestClient
 from app.config import Settings, get_settings
 from app.limitations import LIMITATIONS
 from app.main import create_app
+from app.routers.analysis import analysis_pool
 from app.services.jobs import get_job_store
 
+from . import await_job
 from ..conftest import (
     SCENE_CIRCLES,
     SCENE_SIZE,
@@ -99,7 +102,7 @@ def run_to_result(image: Path, boundary: Path | None = None, **fields) -> dict:
     assert accepted.status_code == 202, accepted.text
     job_id = accepted.json()["job_id"]
 
-    status = client.get(f"/api/jobs/{job_id}").json()
+    status = await_job(client, job_id)
     assert status["status"] == "completed", status.get("error")
 
     response = client.get(f"/api/results/{job_id}")
@@ -127,7 +130,7 @@ class TestSubmission:
     def test_the_job_finishes_and_reports_the_work_it_did(self, utm_raster):
         job_id = submit(utm_raster).json()["job_id"]
 
-        status = client.get(f"/api/jobs/{job_id}").json()
+        status = await_job(client, job_id)
 
         assert status["status"] == "completed"
         assert status["progress"] == 1.0
@@ -138,7 +141,7 @@ class TestSubmission:
     def test_the_parameters_that_were_applied_are_echoed_back(self, utm_raster):
         job_id = submit(utm_raster, confidence_threshold=0.4, min_crown_area_m2=2.0).json()["job_id"]
 
-        parameters = client.get(f"/api/jobs/{job_id}").json()["parameters"]
+        parameters = await_job(client, job_id)["parameters"]
 
         assert parameters["confidence_threshold"] == 0.4
         assert parameters["min_crown_area_m2"] == 2.0
@@ -258,7 +261,9 @@ class TestWithABoundary:
 class TestDownloads:
     @pytest.fixture(scope="module")
     def job_id(self, shared_raster) -> str:
-        return submit(shared_raster).json()["job_id"]
+        job_id = submit(shared_raster).json()["job_id"]
+        assert await_job(client, job_id)["status"] == "completed"
+        return job_id
 
     def test_csv_arrives_as_a_named_download(self, job_id):
         response = client.get(f"/api/results/{job_id}/csv")
@@ -325,7 +330,7 @@ class TestParameterValidation:
         settings = get_settings()
         job_id = submit(utm_raster).json()["job_id"]
 
-        parameters = client.get(f"/api/jobs/{job_id}").json()["parameters"]
+        parameters = await_job(client, job_id)["parameters"]
         assert parameters["confidence_threshold"] == settings.default_confidence
         assert parameters["engine"] == settings.default_engine
 
@@ -384,7 +389,7 @@ class TestFailuresReachTheCaller:
 
         job_id = submit(utm_raster, broken).json()["job_id"]
 
-        status = client.get(f"/api/jobs/{job_id}").json()
+        status = await_job(client, job_id)
         assert status["status"] == "failed"
         assert status["error"]["code"] == "invalid_boundary"
 
@@ -394,6 +399,7 @@ class TestFailuresReachTheCaller:
         broken = tmp_path / "broken.kml"
         broken.write_text("<kml><unclosed>", encoding="utf-8")
         job_id = submit(utm_raster, broken).json()["job_id"]
+        await_job(client, job_id)
 
         response = client.get(f"/api/results/{job_id}")
 
@@ -403,7 +409,7 @@ class TestFailuresReachTheCaller:
     def test_a_boundary_on_ungeoreferenced_imagery_is_explained(self, plain_png, left_half_kml):
         job_id = submit(plain_png, left_half_kml).json()["job_id"]
 
-        status = client.get(f"/api/jobs/{job_id}").json()
+        status = await_job(client, job_id)
         assert status["status"] == "failed"
         assert status["error"]["code"] == "missing_georeference"
 
@@ -497,3 +503,20 @@ class TestCorsIsRestricted:
         )
 
         assert "access-control-allow-origin" not in response.headers
+
+
+class TestConcurrencyBound:
+    """Analyses queue behind a bounded pool rather than all starting at once."""
+
+    def test_the_pool_is_sized_by_configuration(self):
+        # _max_workers is the only view ThreadPoolExecutor offers of its own
+        # bound, and the bound is the whole point of the pool being here.
+        assert analysis_pool()._max_workers == get_settings().max_concurrent_analyses
+
+    def test_more_submissions_than_workers_all_still_finish(self, shared_raster):
+        workers = analysis_pool()._max_workers
+        job_ids = [submit(shared_raster).json()["job_id"] for _ in range(workers + 1)]
+
+        assert [await_job(client, job_id)["status"] for job_id in job_ids] == [
+            "completed"
+        ] * len(job_ids)

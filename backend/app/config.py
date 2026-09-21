@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     max_boundary_upload_mb: int = 32
 
     # --- Processing limits ------------------------------------------------
+    # How many analyses may run at the same time. Detection is CPU- and
+    # memory-bound, so letting every upload start at once does not finish any
+    # of them sooner: it makes all of them slow and risks exhausting the box.
+    # Work above this waits in the queue the job model already describes.
+    max_concurrent_analyses: int = 2
     tile_size: int = 800
     tile_overlap: int = 160
     max_pixels_without_tiling: int = 4_000_000

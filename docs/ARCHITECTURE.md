@@ -3,16 +3,19 @@
 This document describes how the system is put together, why it is split the way
 it is, and which parts are deliberately not built yet.
 
-> **Status: complete end to end.** Engines, tiling, deduplication, CRS handling,
-> boundary parsing and measurement, clipping, area measurement, export, and the
-> HTTP layer that serves all of it are implemented and covered by 413 tests.
-> Imagery goes in over `POST /api/analyze`, progress comes back from
-> `GET /api/jobs/{id}`, and the measured result and both downloads come back
-> from `GET /api/results/{id}`; the browser drives all of that, draws the crowns,
-> and downloads both exports. What remains is deployment configuration — see
-> [Not built yet](#not-built-yet). Nothing in the UI fabricates a figure: every
-> number on screen comes from an analysis response, and a control that cannot do
-> real work is disabled with the reason shown.
+> **Status: complete end to end, and deployable.** Engines, tiling,
+> deduplication, CRS handling, boundary parsing and measurement, clipping, area
+> measurement, export, and the HTTP layer that serves all of it are implemented
+> and covered by 417 tests. Imagery goes in over `POST /api/analyze`, progress
+> comes back from `GET /api/jobs/{id}`, and the measured result and both
+> downloads come back from `GET /api/results/{id}`; the browser drives all of
+> that, draws the crowns, and downloads both exports. CI runs lint, the suite,
+> the frontend build and both container builds on every push, and the hosted
+> configuration is committed (`render.yaml`, `vercel.json`, `docker-compose.yml`).
+> What is still absent is listed under [Not built yet](#not-built-yet). Nothing
+> in the UI fabricates a figure: every number on screen comes from an analysis
+> response, and a control that cannot do real work is disabled with the reason
+> shown.
 
 ## Shape of the system
 
@@ -344,6 +347,23 @@ it, since discarding work somebody is waiting for is the worse failure.
 are rendered from it on request rather than written to disk, so there are no
 per-job files to clean up later.
 
+### Why analyses run on their own bounded pool
+
+Submitting work to the server's general worker threads would let every upload
+start at once — up to the framework's default of forty. Detection is CPU- and
+memory-bound, so forty concurrent analyses do not finish any sooner; they make
+each one slower, and because every endpoint here is synchronous they take the
+same threads the progress polls and the health check need. The failure mode is
+the bad one: the service stops answering, the platform restarts it, and every
+job in memory dies with it.
+
+So analyses are submitted to a `ThreadPoolExecutor` of
+`CANOPYLENS_MAX_CONCURRENT_ANALYSES` threads (default 2). Work above the limit
+queues, reported as the `queued` status the job model already had — which is
+why `processing_time_seconds` is measured from when an analysis *started*, not
+from when it was accepted. The pool is shut down with the application, and by
+`atexit` for a process that is killed rather than stopped.
+
 ### Why a failed job answers like a synchronous call
 
 `JobError` records the failure's `code`, `message` **and** `status_code`. Asking
@@ -502,6 +522,21 @@ assets through the Python host and tie both to one release cycle, which buys
 nothing here. `docker-compose.yml` still brings the whole stack up locally with
 one command.
 
+Both targets are committed rather than described: `render.yaml` builds
+`backend/Dockerfile` as a one-instance web service health-checked on
+`/api/health`, and `vercel.json` builds the client with its SPA fallback and
+cache headers. The one-instance pin is not a cost decision — the job store is
+process memory (see [Why the store is a dictionary](#why-the-store-is-a-dictionary)),
+so a second instance would field polls for jobs it never ran. Moving the store
+to Redis or Postgres is the prerequisite for scaling out, not an afterthought
+to it.
+
+`.github/workflows/ci.yml` runs `ruff check`, the full suite, `tsc -b && vite
+build`, and a build of both images on every push and pull request. It installs
+the core requirements only: the suite treats an absent engine as unavailable
+rather than as a failure, so CI both stays fast and exercises the exact
+dependency set the deployed image ships.
+
 ## Testing
 
 `pytest.ini` and the root `conftest.py` put `backend/` and `ml/` on `sys.path`,
@@ -543,7 +578,7 @@ recorded from an earlier run.
 | End-to-end analysis, filtering, summary statistics, boundary clipping | `tests/pipeline/test_analysis.py` |
 | CSV and GeoJSON export | `tests/pipeline/test_export.py` |
 | Health, capabilities, the boundary endpoint | `tests/backend/` |
-| Upload size limits and filename handling | `tests/backend/test_uploads.py` |
+| Upload size limits, filename handling, the startup sweep | `tests/backend/test_uploads.py` |
 | Submit/poll/collect, downloads, validation, CORS | `tests/backend/test_analysis_api.py` |
 | Job lifecycle, eviction, progress reporting | `tests/backend/test_jobs.py` |
 | The error envelope, and that 500s carry no traceback | `tests/backend/test_errors.py` |
@@ -564,4 +599,5 @@ Listed so the gap is explicit rather than discovered:
   formats the browser can decode
 - Automated tests for the frontend. The payload contract is covered from the
   backend side; the React components are not
-- Deployment configuration for a hosted environment
+- Ground-truth validation. Nothing here has been scored against field-verified
+  crowns, which is why every figure is labelled an estimate

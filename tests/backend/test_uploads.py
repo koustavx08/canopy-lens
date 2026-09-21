@@ -12,7 +12,12 @@ import io
 import pytest
 
 from app.errors import PayloadTooLargeError, UnsupportedFileError
-from app.services.uploads import extension_of, save_upload, temporary_upload
+from app.services.uploads import (
+    discard_orphaned_uploads,
+    extension_of,
+    save_upload,
+    temporary_upload,
+)
 
 
 class FakeUpload:
@@ -106,3 +111,23 @@ class TestTemporaryUpload:
                 captured = path
                 raise ValueError("parsing failed")
         assert captured is not None and not captured.exists()
+
+
+class TestOrphanedUploadSweep:
+    """A file left behind by a killed run belongs to a job that no longer exists."""
+
+    def test_files_left_from_a_previous_run_are_removed(self, tmp_path):
+        upload_dir = tmp_path / "uploads"
+        upload_dir.mkdir()
+        (upload_dir / "abc123.tif").write_bytes(b"leftover imagery")
+        (upload_dir / "def456.kml").write_text("<kml/>", encoding="utf-8")
+
+        removed = discard_orphaned_uploads(upload_dir)
+
+        assert removed == 2
+        assert list(upload_dir.iterdir()) == []
+
+    def test_an_empty_or_absent_directory_is_not_an_error(self, tmp_path):
+        assert discard_orphaned_uploads(tmp_path / "never-created") == 0
+        (tmp_path / "empty").mkdir()
+        assert discard_orphaned_uploads(tmp_path / "empty") == 0

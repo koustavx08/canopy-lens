@@ -12,15 +12,25 @@ finished. So the flow is in three parts:
 The uploaded files are deleted as soon as the analysis has read them. The result
 stays in memory; CSV and GeoJSON are rendered from it on request rather than
 written to disk, so there is nothing to clean up afterwards.
+
+Analyses run on a pool of `CANOPYLENS_MAX_CONCURRENT_ANALYSES` threads rather
+than on the server's general worker threads. Detection saturates a core, so
+starting every upload at once finishes none of them sooner - it only makes each
+one slower and leaves no thread free to answer the progress polls or the health
+check that keeps the service alive. Work beyond the limit waits as `queued`,
+which is a state the job model already has and the interface already shows.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
 from canopylens_ml import registered_engines
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import Response
 
 from ..config import Settings, get_settings
@@ -44,6 +54,35 @@ class JobNotFinishedError(CanopyLensError):
     code = "job_not_finished"
 
 
+@lru_cache
+def analysis_pool() -> ThreadPoolExecutor:
+    """The bounded pool every analysis runs on.
+
+    One pool for the process, created on first use so that a test which
+    overrides the settings gets the size it asked for.
+    """
+    workers = max(1, get_settings().max_concurrent_analyses)
+    log.info("Analysis pool: %d concurrent analysis(es)", workers)
+    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix="analysis")
+
+
+def shutdown_analysis_pool() -> None:
+    """Stop accepting analyses and drop any that have not started.
+
+    Called on shutdown. Work already running is left to finish: it holds an
+    open raster and a half-written job, and killing it mid-read would leave
+    neither cleaned up.
+    """
+    if analysis_pool.cache_info().currsize:
+        analysis_pool().shutdown(wait=False, cancel_futures=True)
+        analysis_pool.cache_clear()
+
+
+# A worker process that is terminated rather than shut down cleanly still has
+# to release its threads, or the interpreter hangs on exit.
+atexit.register(shutdown_analysis_pool)
+
+
 MAX_MIN_CROWN_AREA_M2 = 100_000.0
 """Upper bound on the crown-area filter: ten hectares, which is not a crown.
 
@@ -64,7 +103,6 @@ return an honest, useless zero.
     },
 )
 def start_analysis(
-    background: BackgroundTasks,
     image: UploadFile = File(..., description="GeoTIFF, PNG or JPEG imagery to analyse"),
     boundary: UploadFile | None = File(
         None, description="Optional KML, KMZ or GeoJSON boundary restricting the analysis"
@@ -135,9 +173,13 @@ def start_analysis(
         parameters=parameters,
     )
 
-    background.add_task(
+    future = analysis_pool().submit(
         _run_analysis, store, job.id, image_path, boundary_path, parameters, display_name
     )
+    # A future nobody awaits swallows whatever it raises. `_run_analysis`
+    # handles its own failures, so anything arriving here escaped even that -
+    # which would leave the job reading "running" forever with no trace of why.
+    future.add_done_callback(_log_if_the_thread_crashed)
 
     return JobAcceptedResponse(
         job_id=job.id,
@@ -212,6 +254,12 @@ def get_result_geojson(job_id: str, store: JobStore = Depends(get_job_store)) ->
 
 
 # --- running the job ------------------------------------------------------
+
+
+def _log_if_the_thread_crashed(future) -> None:
+    error = future.exception()
+    if error is not None:
+        log.error("Analysis thread crashed outside its own error handling", exc_info=error)
 
 
 def _run_analysis(

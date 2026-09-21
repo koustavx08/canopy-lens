@@ -11,9 +11,9 @@ the result.
 
 ## Project status
 
-**The backend is complete: imagery goes in over HTTP, measured crowns come
-back out, and both exports download. What remains is the browser interface that
-puts it in front of a user.**
+**Complete and deployable. Imagery goes in over HTTP, measured crowns come back
+out in the browser, both exports download, and the whole of it builds, tests and
+deploys from the manifests in this repository.**
 
 | Area | State |
 | --- | --- |
@@ -31,8 +31,9 @@ puts it in front of a user.**
 | Upload, settings, progress and results in the browser | Working |
 | Crown polygons on the map, crown IDs, click-to-inspect | Working |
 | CSV and GeoJSON download buttons | Working |
-| Test suite (413 tests) | Passing |
-| Deployment configuration for a hosted environment | **Not built yet** |
+| Test suite (417 tests) | Passing |
+| Continuous integration: lint, tests, frontend build, both images | Working |
+| Deployment configuration: Docker Compose, Render blueprint, Vercel project | Working |
 
 The whole pipeline is reachable over HTTP:
 
@@ -85,8 +86,6 @@ support reads as an em dash rather than a plausible zero.
 - Serves every figure above over HTTP, with CSV and GeoJSON downloads
 - Draws the crowns over a map, labels them, and reports one in detail when it
   is clicked
-
-Still to come: deployment configuration for a hosted environment.
 
 ---
 
@@ -402,6 +401,63 @@ truthfully which engines are usable.
 
 ---
 
+## Deploying it
+
+Two manifests are committed, and between them they describe the whole hosted
+system: [`render.yaml`](render.yaml) for the API and
+[`vercel.json`](vercel.json) for the browser client. Neither is required — the
+Docker stack above is a complete deployment on any host that runs containers —
+but they make the split deployment the roadmap called for a two-step job.
+
+### The API on Render
+
+1. **New → Blueprint**, point it at this repository, apply. Render reads
+   `render.yaml`, builds `backend/Dockerfile` from the repository root, and
+   health-checks `/api/health`.
+2. Once it is live, set `CANOPYLENS_CORS_ORIGINS` to the frontend's origin
+   (`https://<your-app>.vercel.app`) and redeploy.
+
+The blueprint pins the service to **one instance**, deliberately. Jobs live in
+the memory of the process that ran them (see [Where jobs
+live](#where-jobs-live)), so a second instance would answer a poll for a job it
+had never heard of. The same applies to `--workers`: keep it at one, or move
+the job store out of process first.
+
+`CANOPYLENS_MAX_UPLOAD_MB` is set to `128` rather than the local default of
+`512`, because a 512 MB raster will exhaust a starter instance's memory long
+before it finishes. Raise it with the plan.
+
+### The client on Vercel
+
+1. **Add New → Project**, import this repository, accept the settings — the
+   build command, output directory, SPA rewrite and cache headers all come from
+   `vercel.json`.
+2. Set one environment variable, **`VITE_API_BASE_URL`**, to the Render URL
+   (`https://canopylens-api.onrender.com`, no trailing slash), and deploy.
+
+`VITE_*` values are compiled into the bundle, so a change to that variable needs
+a redeploy, not just a restart. The two origins differ, which is exactly why the
+API's `CANOPYLENS_CORS_ORIGINS` has to name the Vercel domain: a deployment
+where `curl` works and the browser does not is almost always this.
+
+### Either host, or neither
+
+Nothing here is specific to those two vendors. The API image takes `$PORT`, so
+Fly, Railway and Cloud Run run it unchanged; the client is static files plus a
+fallback to `index.html`, which every static host can do. Only the CORS setting
+and `VITE_API_BASE_URL` have to agree.
+
+### What CI checks
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+pull request: `ruff check`, the full `pytest` suite, `tsc -b && vite build`, and
+a build of both container images. The deep-learning extras are not installed in
+CI — the suite is written so an absent engine reports itself unavailable instead
+of failing, which keeps the run in minutes and proves the deployed image's
+configuration works.
+
+---
+
 ## Environment variables
 
 Every backend variable is optional; the default shown is what applies when it is
@@ -419,6 +475,7 @@ unset. Full annotated list: [`.env.example`](.env.example).
 | `CANOPYLENS_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated allowed browser origins |
 | `CANOPYLENS_DATA_DIR` | `backend/.data` | Where uploads and results are written; relative paths resolve from the repo root |
 | `CANOPYLENS_MAX_UPLOAD_MB` | `512` | Per-file imagery upload limit; larger requests get HTTP 413 |
+| `CANOPYLENS_MAX_CONCURRENT_ANALYSES` | `2` | How many analyses run at once; the rest wait as `queued` |
 | `CANOPYLENS_MAX_BOUNDARY_UPLOAD_MB` | `32` | Separate, much lower limit for boundary files — a KML is text describing an outline, and the imagery allowance has no business applying to it |
 | `CANOPYLENS_TILE_SIZE` | `800` | Tile edge length in pixels |
 | `CANOPYLENS_TILE_OVERLAP` | `160` | Overlap between neighbouring tiles, in pixels |
@@ -677,9 +734,16 @@ is stated rather than discovered:
   or move the store to Redis before scaling out.
 - **At most 50 jobs are remembered**, oldest finished first. Work still running
   is never evicted to make room.
+- **At most `CANOPYLENS_MAX_CONCURRENT_ANALYSES` run at once** (default 2).
+  Detection saturates a core, so starting every upload at once finishes none of
+  them sooner; it only slows all of them and leaves no thread to answer the
+  progress polls. A submission over the limit is accepted and waits as
+  `queued`, which the interface shows.
 
 Uploaded files are deleted as soon as the analysis has read them, so a completed
-job leaves nothing on disk.
+job leaves nothing on disk — and anything left by a run that was killed
+mid-flight is swept at the next startup, since the job that owned it is gone
+with the process.
 
 
 ```bash
@@ -721,6 +785,10 @@ measured and discarded within the request; nothing is stored.
   simply a key that is not there and answers 404.
 - **Nothing uploaded is executed or interpreted** - imagery is opened by
   rasterio and boundaries are parsed as XML or JSON, both as data.
+- **Uploads outlive nothing.** An analysis deletes its imagery as soon as it has
+  read it, a boundary preview deletes its file before it answers, and anything
+  still in the upload directory at startup is swept: the job that owned it died
+  with the previous process, so there is nothing left to resume.
 - **CORS is an allow-list** from `CANOPYLENS_CORS_ORIGINS`, not `*`.
 - **Stack traces never appear in a response.** An unexpected failure is logged
   in full on the server, where it is useful, and returns a plain 500 saying
@@ -828,7 +896,14 @@ such rather than a square-metre value that looks authoritative and is not.
 7. ~~**Results and interaction**~~ - crown polygons on the map with their IDs,
    click-to-inspect (Crown ID, confidence, area, centroid), the metrics panel,
    the score distribution, staged progress, and both downloads. **Done.**
-8. **Deployment** - frontend on Vercel, backend on Render or Fly.
+8. ~~**Deployment**~~ - a Render blueprint for the API, a Vercel project for
+   the client, the Docker Compose stack for anywhere else, and CI running lint,
+   tests, the frontend build and both container builds on every push. **Done.**
+
+That is the whole of what was planned. What would come next is not more of the
+same: ground-truth validation against annotated imagery, a job store that
+survives a restart, and species or height estimation - each a different project
+with its own honesty problem to solve.
 
 ---
 

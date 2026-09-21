@@ -128,6 +128,32 @@ def temporary_upload(
         path.unlink(missing_ok=True)
 
 
+def discard_orphaned_uploads(upload_dir: Path) -> int:
+    """Delete every file left in the upload directory, returning how many.
+
+    Called once at startup. An analysis removes its own upload as it finishes,
+    so a file surviving a restart is one whose job no longer exists: the job
+    store lives in the process and does not outlive it either. Nothing here can
+    be resumed, so nothing here is worth keeping.
+    """
+    if not upload_dir.is_dir():
+        return 0
+    removed = 0
+    for entry in upload_dir.iterdir():
+        try:
+            if entry.is_file():
+                entry.unlink()
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError as error:
+            # A file another process still holds open is not worth failing
+            # startup over; it will be swept on the next restart.
+            log.warning("Could not remove orphaned upload %s: %s", entry.name, error)
+            continue
+        removed += 1
+    return removed
+
+
 def clear_directory(path: Path) -> None:
     """Remove a directory and everything in it, ignoring what is not there."""
     shutil.rmtree(path, ignore_errors=True)

@@ -22,6 +22,7 @@ from app.config import Settings, get_settings
 from app.main import create_app
 from app.services.jobs import get_job_store
 
+from . import await_job
 from ..conftest import (
     PIXEL_METRES,
     SCENE_CIRCLES,
@@ -170,9 +171,11 @@ def analysed(tmp_path_factory, raster, boundary) -> dict:
             )
         assert accepted.status_code == 202, accepted.text
         job_id = accepted.json()["job_id"]
+        job = await_job(client, job_id)
+        assert job["status"] == "completed", job.get("error")
         return {
             "accepted": accepted.json(),
-            "job": client.get(f"/api/jobs/{job_id}").json(),
+            "job": job,
             "result": client.get(f"/api/results/{job_id}").json(),
         }
     finally:

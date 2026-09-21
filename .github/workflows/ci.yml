@@ -1,0 +1,93 @@
+# CanopyLens CI
+# ---------------------------------------------------------------------------
+# Three checks, matching what a contributor runs locally: lint, the test suite,
+# and a production build of the frontend.
+#
+# The optional deep-learning extras (requirements-ml.txt, ~2.5 GB) are NOT
+# installed. The suite is written so that an engine reports itself unavailable
+# rather than failing, so all 413 tests pass either way and CI stays minutes
+# rather than tens of minutes.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The version the project is developed against and the one the API
+          # image ships; no matrix until a second version is actually supported.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check backend ml tests
+
+      - name: Pytest
+        run: pytest
+
+  frontend:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # `npm run build` is `tsc -b && vite build`, so this is the typecheck too.
+      - run: npm run build
+
+  docker:
+    name: Build images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
