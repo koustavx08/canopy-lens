@@ -361,9 +361,9 @@ def _require_job(store: JobStore, job_id: str) -> Job:
     job = store.get(job_id)
     if job is None:
         raise ResourceNotFoundError(
-            "No analysis job with that id. Jobs are held in memory, so a "
-            "restart of the server clears them and an id from a previous run "
-            "will not be found.",
+            "No analysis job with that id. The server remembers the last 50 "
+            "jobs and forgets the oldest finished ones first, so an id from "
+            "long enough ago will not be found.",
             detail={"job_id": job_id},
         )
     return job

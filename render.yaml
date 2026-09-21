@@ -20,8 +20,10 @@ services:
     plan: starter
     region: oregon
     healthCheckPath: /api/health
-    # Jobs live in the memory of one process (see README, "Where jobs live"),
-    # so a second instance would answer polls for work it never ran.
+    # Jobs are recorded in a SQLite file in the instance's own filesystem (see
+    # README, "Where jobs live"). Workers on one instance share it; a second
+    # instance would have its own, and would answer polls for work it never
+    # ran with a 404. Scaling out needs a shared database first.
     numInstances: 1
     envVars:
       - key: CANOPYLENS_ENVIRONMENT

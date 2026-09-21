@@ -19,6 +19,7 @@ from .logging_config import configure_logging
 from .routers import analysis, boundary, health
 from .schemas import HealthResponse
 from .security import RateLimitMiddleware, require_api_key
+from .services.jobs import get_job_store
 from .services.uploads import discard_orphaned_uploads
 
 log = logging.getLogger("canopylens")
@@ -55,6 +56,7 @@ async def lifespan(app: FastAPI):
     # Stop the analysis pool before the process goes: a thread still waiting to
     # start work would otherwise hold the interpreter open at exit.
     analysis.shutdown_analysis_pool()
+    get_job_store().close()
     log.info("CanopyLens API shutting down")
 
 

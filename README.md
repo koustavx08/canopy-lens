@@ -750,17 +750,25 @@ curl -OJ http://127.0.0.1:8000/api/results/fba1ea.../geojson
 
 ### Where jobs live
 
-In memory, in the API process. Results are useful for as long as the tab that
-asked for them is open, and a database would mean inventing retention rules,
-migrations and cleanup for data whose whole lifetime is a few minutes. The cost
-is stated rather than discovered:
+In memory, and in `jobs.db` inside `CANOPYLENS_DATA_DIR`. Memory is the working
+copy; the SQLite file is the record, written through on every change. A poll
+for a job this process is running is answered from memory without touching the
+disk; anything else is read from the file.
 
-- **A restart forgets every job.** An id from a previous run returns 404, and
-  says so in the message.
-- **Jobs do not survive across worker processes.** Run the API with one worker,
-  or move the store to Redis before scaling out.
-- **At most 50 jobs are remembered**, oldest finished first. Work still running
-  is never evicted to make room.
+- **A restart keeps finished results.** Work that was still running when the
+  process died is closed out as `failed` with the code `interrupted`, because a
+  job left at "running" describes work no thread is doing any more.
+- **Several workers on one host share the file**, so a poll can be answered by
+  a worker that did not run the analysis, and the queue limit applies to all of
+  them together rather than to each of them separately.
+- **Several hosts do not.** Two machines have two files. That needs a shared
+  database rather than a local one, which is why `render.yaml` runs a single
+  instance.
+- **A data directory that cannot be written to costs durability and nothing
+  else.** The store logs the reason and carries on in memory rather than
+  refusing to start.
+- **At most 50 jobs are remembered**, oldest finished first, in memory and in
+  the file alike. Work still running is never evicted to make room.
 - **At most `CANOPYLENS_MAX_CONCURRENT_ANALYSES` run at once** (default 2).
   Detection saturates a core, so starting every upload at once finishes none of
   them sooner; it only slows all of them and leaves no thread to answer the

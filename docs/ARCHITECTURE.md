@@ -589,9 +589,9 @@ recorded from an earlier run.
 
 Listed so the gap is explicit rather than discovered:
 
-- A job store that survives a restart or a second worker. The current one is
-  in-process memory, bounded at 50 jobs, and says so in the 404 it returns for
-  an id it has forgotten
+- A job store shared between hosts. The SQLite record survives a restart and is
+  shared by every worker on one machine, but two machines have two files; that
+  needs a database rather than a local file
 - Cancelling a running analysis. The browser can stop watching one, which
   releases the page, but the work on the server runs to completion
 - Rendering the uploaded GeoTIFF itself in the browser. The map shows its crowns
