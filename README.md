@@ -507,11 +507,21 @@ and `VITE_API_BASE_URL` have to agree.
 ### What CI checks
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
-pull request: `ruff check`, the full `pytest` suite, `tsc -b && vite build`, and
-a build of both container images. The deep-learning extras are not installed in
-CI — the suite is written so an absent engine reports itself unavailable instead
-of failing, which keeps the run in minutes and proves the deployed image's
-configuration works.
+pull request: `ruff check`, the `pytest` suite, `tsc -b && vite build`, a build
+of both container images, and a job of its own that installs CPU torch and runs
+the deep-learning engine for real.
+
+The main suite does not install the extras. It is written so an absent engine
+reports itself unavailable instead of failing, which keeps the run in minutes
+and proves the configuration the deployed image actually ships. The engine still
+has to be exercised somewhere, or the path a server takes *with* the extras
+installed is never executed by anything — so the tests marked `slow` load the
+weights and run a real forward pass, and are excluded from the default run:
+
+```bash
+pytest           # the suite, seconds
+pytest -m slow   # the deep-learning engine, minutes
+```
 
 ---
 

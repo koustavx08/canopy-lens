@@ -1,12 +1,18 @@
 # CanopyLens CI
 # ---------------------------------------------------------------------------
-# Three checks, matching what a contributor runs locally: lint, the test suite,
-# and a production build of the frontend.
+# Four checks: lint and the default suite, a production build of the frontend,
+# both container images, and the deep-learning engine actually running.
 #
-# The optional deep-learning extras (requirements-ml.txt, ~2.5 GB) are NOT
-# installed. The suite is written so that an engine reports itself unavailable
-# rather than failing, so all 413 tests pass either way and CI stays minutes
-# rather than tens of minutes.
+# The default suite does not install the optional extras (requirements-ml.txt,
+# torch and weights). It is written so an absent engine reports itself
+# unavailable rather than failing, which keeps the run in minutes and proves
+# the configuration the deployed image actually ships.
+#
+# The engine still has to be exercised somewhere, or the path a server takes
+# with the extras installed is never executed by anything. That is the `ml`
+# job: it installs CPU torch, runs only the tests marked `slow`, and caches
+# both the wheels and the downloaded weights so repeat runs are not spent
+# fetching the same two hundred megabytes.
 # ---------------------------------------------------------------------------
 name: CI
 
@@ -45,6 +51,44 @@ jobs:
 
       - name: Pytest
         run: pytest
+
+  ml:
+    name: Detection engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements-dev.txt
+            backend/requirements-ml.txt
+
+      - name: Cache the model weights
+        uses: actions/cache@v4
+        with:
+          # Fetched from Hugging Face on first use. Keyed on the requirements
+          # file because the model a DeepForest release pulls is part of what
+          # that release is.
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('backend/requirements-ml.txt') }}
+
+      - name: Install dependencies, deep-learning extras included
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+          # CPU wheels: the runner has no GPU, and the CUDA build is several
+          # gigabytes of driver support that would never be loaded.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r backend/requirements-ml.txt
+
+      - name: Pytest, the slow tests only
+        # The rest of the suite ran in the `backend` job without the extras,
+        # which is the configuration that matters there. Running it again here
+        # would test the same code twice and the engine no more thoroughly.
+        run: pytest -m slow
 
   frontend:
     name: Typecheck and build

@@ -15,6 +15,11 @@ class DetectionParams:
     """
 
     confidence_threshold: float = 0.30
+    """Advisory. Engines report what they found and the pipeline discards
+    what scores below this, in one place, so that every engine is filtered on
+    the same terms. An engine may use it to skip work it knows will be thrown
+    away; it must not rely on being the only thing that applies it."""
+
     min_crown_area_px: float = 0.0
     max_crown_area_px: float | None = None
     tile_size: int = 800
