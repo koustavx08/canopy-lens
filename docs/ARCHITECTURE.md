@@ -6,7 +6,7 @@ it is, and which parts are deliberately not built yet.
 > **Status: complete end to end, and deployable.** Engines, tiling,
 > deduplication, CRS handling, boundary parsing and measurement, clipping, area
 > measurement, export, and the HTTP layer that serves all of it are implemented
-> and covered by 417 tests. Imagery goes in over `POST /api/analyze`, progress
+> and covered by 575 tests. Imagery goes in over `POST /api/analyze`, progress
 > comes back from `GET /api/jobs/{id}`, and the measured result and both
 > downloads come back from `GET /api/results/{id}`; the browser drives all of
 > that, draws the crowns, and downloads both exports. CI runs lint, the suite,

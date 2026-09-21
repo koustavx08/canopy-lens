@@ -28,11 +28,16 @@ deploys from the manifests in this repository.**
 | `POST /api/analyze` - upload, validate, run, track | Working |
 | `GET /api/jobs/{id}` - status, stage, tile-based progress | Working |
 | `GET /api/results/{id}` and its CSV and GeoJSON downloads | Working |
+| `POST /api/jobs/{id}/cancel` - stop an analysis that has not finished | Working |
+| Jobs and results recorded on disk, surviving a restart and shared by every worker on the host | Working |
+| API keys, per-caller rate limiting, a bounded queue | Working |
+| Request ids, an access log, readiness checks, Prometheus counters | Working |
+| `app.validate` - precision, recall, F1 and area agreement against verified crowns | Working |
 | Upload, settings, progress and results in the browser | Working |
 | Crown polygons on the map, crown IDs, click-to-inspect | Working |
 | CSV and GeoJSON download buttons | Working |
-| Test suite (417 tests) | Passing |
-| Continuous integration: lint, tests, frontend build, both images | Working |
+| Test suite: 508 backend, 57 browser, 10 exercising the real model | Passing |
+| Continuous integration: lint, tests, the ML engine, frontend build, both images | Working |
 | Deployment configuration: Docker Compose, Render blueprint, Vercel project | Working |
 
 The whole pipeline is reachable over HTTP:
