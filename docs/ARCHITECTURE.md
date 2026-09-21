@@ -595,7 +595,5 @@ Listed so the gap is explicit rather than discovered:
 - Rendering the uploaded GeoTIFF itself in the browser. The map shows its crowns
   at their real position over a basemap; the pixel view is available only for
   formats the browser can decode
-- Automated tests for the frontend. The payload contract is covered from the
-  backend side; the React components are not
 - Ground-truth validation. Nothing here has been scored against field-verified
   crowns, which is why every figure is labelled an estimate

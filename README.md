@@ -368,9 +368,11 @@ cd frontend && npm run dev
 ### Other commands
 
 ```bash
-pytest                       # backend + geospatial tests
-cd frontend && npm run build # type-check and production build
-cd frontend && npm run lint  # type-check only
+pytest                        # backend + geospatial tests
+pytest -m slow                # the deep-learning engine, for real (minutes)
+cd frontend && npm test       # browser tests (vitest + testing-library)
+cd frontend && npm run build  # type-check and production build
+cd frontend && npm run lint   # type-check only
 ```
 
 ---
@@ -519,8 +521,9 @@ installed is never executed by anything — so the tests marked `slow` load the
 weights and run a real forward pass, and are excluded from the default run:
 
 ```bash
-pytest           # the suite, seconds
-pytest -m slow   # the deep-learning engine, minutes
+pytest                      # the backend suite, seconds
+pytest -m slow              # the deep-learning engine, minutes
+npm --prefix frontend test  # the browser suite, seconds
 ```
 
 ---

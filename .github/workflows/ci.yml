@@ -91,7 +91,7 @@ jobs:
         run: pytest -m slow
 
   frontend:
-    name: Typecheck and build
+    name: Test, typecheck and build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -107,7 +107,11 @@ jobs:
 
       - run: npm ci
 
-      # `npm run build` is `tsc -b && vite build`, so this is the typecheck too.
+      - name: Vitest
+        run: npm test
+
+      # `npm run build` is `tsc -b && vite build`, so this is the typecheck too,
+      # and it typechecks the tests along with the code they cover.
       - run: npm run build
 
   docker:
