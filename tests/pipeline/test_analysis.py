@@ -112,8 +112,21 @@ class TestSummaryStatistics:
     def test_total_canopy_area_is_the_union_not_the_sum(self, result):
         # With well-separated crowns the two agree; the guarantee is that the
         # total never exceeds the sum, which is what stops overlapping crowns
-        # from being counted twice.
-        assert result.summary.total_canopy_area_m2 <= result.summary.sum_crown_area_m2 + 1e-6
+        # from being counted twice. Checked with no tolerance: both figures are
+        # reported to two decimals, and this scene's crowns add up to exactly
+        # 761.125 m2 - a rounding tie, where a disagreement far below the
+        # precision being reported still decides which way each value goes.
+        assert result.summary.total_canopy_area_m2 <= result.summary.sum_crown_area_m2
+
+    def test_the_union_is_measured_on_the_same_projection_as_the_crown_areas(self, result):
+        # These crowns do not overlap, so the union covers exactly the ground
+        # their areas add up to. The two figures disagreeing would mean they
+        # were measured on differently projected copies of the same crowns -
+        # which is what happens if the union is taken over the WGS84 geometry
+        # while the areas are measured in the metric CRS directly.
+        assert result.summary.total_canopy_area_m2 == pytest.approx(
+            result.summary.sum_crown_area_m2, abs=0.01
+        )
 
     def test_the_confidence_histogram_accounts_for_every_crown(self, result):
         total = sum(b.count for b in result.summary.confidence_distribution)

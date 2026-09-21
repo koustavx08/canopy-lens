@@ -92,6 +92,7 @@ class Crown:
     centroid: tuple[float, float]
     centroid_lonlat: tuple[float, float] | None
     geometry_px: Polygon
+    geometry_crs: Polygon | None
     geometry_wgs84: Polygon | None
     engine: str
     confidence_kind: str
@@ -659,6 +660,7 @@ def _build_crowns(
                 centroid=(float(centroid.x), float(centroid.y)),
                 centroid_lonlat=centroid_lonlat,
                 geometry_px=pixel_polygon,
+                geometry_crs=geometry_crs,
                 geometry_wgs84=geometry_wgs84,
                 engine=engine_name,
                 confidence_kind=confidence_kind,
@@ -760,10 +762,15 @@ def _summarise(
     canopy_m2 = None
     sum_crown_area_m2 = None
     if georeferenced:
+        # Projected by the same route `area_m2` used, and repaired the same
+        # way, so that the union and the sum describe the same polygons. Going
+        # via WGS84 instead would be a second transform of the same crown: the
+        # areas would differ in the fifth significant figure, and the union
+        # could come out fractionally larger than the sum it must never exceed.
         projected = [
-            geo.to_crs(c.geometry_wgs84, geo.WGS84, metric_crs)
+            geo.repair(geo.to_crs(c.geometry_crs, source_crs, metric_crs))
             for c in crowns
-            if c.geometry_wgs84 is not None
+            if c.geometry_crs is not None
         ]
         region_metric = geo.to_crs(region, source_crs, metric_crs)
         canopy_m2 = _union_area(projected, clip_to=region_metric)
@@ -791,11 +798,21 @@ def _summarise(
     areas_px = [c.pixel_area for c in crowns]
     confidences = [c.confidence for c in crowns]
 
+    # The ground the crowns cover cannot exceed the ground they add up to.
+    # Measuring both on the same polygons makes that true of the raw figures;
+    # the cap makes it true of the reported ones as well. A scene can land
+    # exactly on a .005 boundary, and there a disagreement far below the two
+    # decimals being reported is still enough to round the pair apart.
+    reported_sum = None if sum_crown_area_m2 is None else round(sum_crown_area_m2, 2)
+    reported_canopy = None if canopy_m2 is None else round(canopy_m2, 2)
+    if reported_canopy is not None and reported_sum is not None:
+        reported_canopy = min(reported_canopy, reported_sum)
+
     return AnalysisSummary(
         tree_count=len(crowns),
-        total_canopy_area_m2=None if canopy_m2 is None else round(canopy_m2, 2),
+        total_canopy_area_m2=reported_canopy,
         total_canopy_area_px=round(canopy_px_union, 2),
-        sum_crown_area_m2=None if sum_crown_area_m2 is None else round(sum_crown_area_m2, 2),
+        sum_crown_area_m2=reported_sum,
         analyzed_area_m2=None if region_area_m2 is None else round(region_area_m2, 2),
         analyzed_area_px=round(analyzed_area_px, 2),
         canopy_coverage_pct=None if coverage is None else round(coverage, 2),
