@@ -595,5 +595,8 @@ Listed so the gap is explicit rather than discovered:
 - Rendering the uploaded GeoTIFF itself in the browser. The map shows its crowns
   at their real position over a basemap; the pixel view is available only for
   formats the browser can decode
-- Ground-truth validation. Nothing here has been scored against field-verified
-  crowns, which is why every figure is labelled an estimate
+- A validated accuracy figure. The harness to produce one is here -
+  `app.validate` scores a run against verified crowns and reports precision,
+  recall, F1 and area agreement - but no ground-truth dataset ships with this
+  repository, and none is invented. Until somebody runs it against their own
+  labelled imagery, every figure stays labelled an estimate

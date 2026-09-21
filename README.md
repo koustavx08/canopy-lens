@@ -373,6 +373,9 @@ pytest -m slow                # the deep-learning engine, for real (minutes)
 cd frontend && npm test       # browser tests (vitest + testing-library)
 cd frontend && npm run build  # type-check and production build
 cd frontend && npm run lint   # type-check only
+
+# Score a run against crowns you have verified yourself:
+cd backend && python -m app.validate --truth crowns.geojson --imagery scene.tif
 ```
 
 ---
@@ -569,6 +572,62 @@ unset. Full annotated list: [`.env.example`](.env.example).
 
 `VITE_*` values are compiled into the bundle at build time, so changing one
 requires a rebuild — for Docker, pass it as `--build-arg`.
+
+---
+
+## Measuring how good it is
+
+Every figure this tool reports is labelled an estimate. That is honest and
+unquantified — it says the number might be wrong without saying by how much.
+`app.validate` is how that becomes a measurement:
+
+```bash
+cd backend
+
+# Score an export you already have
+python -m app.validate --truth crowns.geojson --detections run.geojson
+
+# Or analyse imagery now and score the result
+python -m app.validate --truth crowns.geojson --imagery scene.tif --engine deepforest
+```
+
+Ground truth is a GeoJSON holding **one polygon per verified tree** — crowns
+delineated in QGIS over the same imagery, or from field survey. It is read
+feature by feature, so two crowns whose canopies touch stay two crowns.
+
+The report answers both questions a canopy tool is judged on:
+
+```
+  Ground truth crowns   5
+  Detected crowns       5
+  Matched               5
+
+  Precision             1.000
+  Recall                1.000
+  F1                    1.000
+  Mean IoU of matches   0.949
+
+  Truth canopy area     800.78 m2
+  Detected canopy area  761.12 m2
+  Detected / truth      0.950
+```
+
+Matching is **one-to-one**, greedily by best overlap. A detection covering two
+neighbouring trees is credited to one of them, never both — that merge is the
+classical engine's characteristic failure in closed canopy, and letting it
+count twice would report a recall it has not earned. The IoU threshold defaults
+to 0.5 and is printed with every score, because a precision figure means
+nothing without it.
+
+Precision, recall and F1 are shown as `—` rather than 0 or 1 where they are
+undefined. Finding nothing in an empty scene scores 1.000 arithmetically, and
+that is not a result worth printing.
+
+**No ground-truth dataset ships with this repository, and none is generated.**
+A harness scored against synthetic circles would report a number about circles.
+The dataset is yours to bring, and it is specific to your sensor, season and
+region — which is the same domain-shift limitation the interface states about
+the detector itself.
 
 ---
 

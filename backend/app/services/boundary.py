@@ -316,11 +316,11 @@ def _parse_geojson_with_crs(text: str) -> tuple[BaseGeometry, CRS, list[str]]:
     if not polygons:
         raise InvalidBoundaryError(_no_area_message(saw_geometry))
 
-    crs, warnings = _geojson_crs(payload)
+    crs, warnings = geojson_crs(payload)
     return _combine(polygons), crs, warnings
 
 
-def _geojson_crs(payload: dict) -> tuple[CRS, list[str]]:
+def geojson_crs(payload: dict) -> tuple[CRS, list[str]]:
     """The CRS a GeoJSON declares, or WGS84 as RFC 7946 requires.
 
     RFC 7946 removed the `crs` member and fixed GeoJSON to WGS84, but files
