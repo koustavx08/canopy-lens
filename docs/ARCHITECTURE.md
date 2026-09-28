@@ -31,9 +31,9 @@ Three deployable pieces:
 
 | Piece | Location | Responsibility |
 | --- | --- | --- |
-| Web client | `frontend/` | Upload, map/imagery display, crown rendering and inspection, results, export downloads |
-| API | `backend/` | HTTP contract, validation, file storage, geospatial maths, orchestration of a detection run |
-| Detection library | `ml/` | Turning an image array into crown polygons. Knows nothing about HTTP, CRS, or files |
+| Web client | `frontend/` | Multi-module UI: Detection survey, Model Benchmarks & Registry, Vegetation Health, Temporal Change, crown inspection, uncertainty & diagnostics, export downloads |
+| API | `backend/` | HTTP contract, validation, file storage, geospatial maths, background job management, ML Intelligence routers (`/api/models`, `/api/vegetation`, `/api/change`) |
+| Forest Intelligence Engine | `ml/canopylens_ml/` | Detection engines, instance segmentation, spatial block evaluation, domain fine-tuning, temperature calibration, multispectral indices, multi-temporal change detection |
 
 ## Why three pieces instead of two
 
@@ -583,7 +583,72 @@ recorded from an earlier run.
 | Job lifecycle, eviction, progress reporting | `tests/backend/test_jobs.py` |
 | The error envelope, and that 500s carry no traceback | `tests/backend/test_errors.py` |
 | The payload keys the browser reads | `tests/backend/test_frontend_contract.py` |
-| Engines, registry, pixel-space primitives | `tests/ml/` |
+| Engines, registry, pixel-space primitives | `tests/ml/test_engines.py` |
+| ML evaluation metrics, dataset loading, spatial split | `tests/ml/test_evaluation.py` |
+| Model registry and domain fine-tuning pipeline | `tests/ml/test_training.py` |
+| Instance segmentation and confidence calibration | `tests/ml/test_segmentation_calibration.py` |
+| Multispectral and RGB vegetation indices | `tests/ml/test_multispectral.py` |
+| Multi-temporal canopy change detection | `tests/ml/test_temporal_change.py` |
+| ML Intelligence HTTP endpoints | `tests/backend/test_ml_intelligence_api.py` |
+| Frontend ML Intelligence components | `frontend/src/components/IntelligenceComponents.test.tsx` |
+
+## Forest Intelligence Engine (Modules A – F)
+
+The ML upgrade transforms CanopyLens into a scientifically evaluable Forest Intelligence Engine.
+
+### 1. ML Evaluation Framework & Baseline Benchmarking (Module A)
+- **Multi-threshold IoU matching**: Evaluates IoU matches from 0.50 to 0.95 in steps of 0.05 (standard COCO convention).
+- **Comprehensive metrics**: Precision, Recall, F1-score, all-point interpolated Average Precision (AP), mAP@50, mAP@75, mAP@50:95.
+- **Ecological count and crown metrics**: Count Mean Absolute Error (MAE), Count Root Mean Squared Error (RMSE), Mean Crown Area MAE ($m^2$), and Crown Area Ratio.
+- **Dataset ingestion**: Parsers for COCO JSON (`load_coco_dataset`), DeepForest CSV (`load_csv_dataset`), and GeoJSON (`load_geojson_dataset`).
+- **Spatial Block Partitioning**: Implemented in `spatial_block_split` to divide scenes into disjoint geographic grid blocks before splitting into train/test sets, strictly eliminating spatial autocorrelation data leakage.
+- **Forest-type stratification**: Stratifies evaluations across dense closed canopies, open savannas, and conifer plantations.
+- **Reporting**: Automated JSON (`EvaluationReport.to_json()`) and GitHub-flavored Markdown (`EvaluationReport.to_markdown()`) report generation.
+
+### 2. Domain-Specific Fine-Tuning & Model Registry (Module B)
+- **Model Registry (`ModelRegistry`)**: Thread-safe persistent JSON store (`model_registry.json`) indexing model IDs, architecture, checkpoints, training hyperparameter configurations, target image resolutions, and validation benchmark scores.
+- **Fine-Tuning Engine (`TreeCrownTrainer`)**:
+  - Reproducible training runs with fixed random seeds (`random`, `numpy`, `torch`).
+  - Device autodetection (CUDA/MPS/CPU) with explicit warnings regarding CPU training performance.
+  - DeepForest/RetinaNet fine-tuning with early stopping on validation loss.
+  - CPU-safe simulation fallback preserving complete execution paths even in lightweight environments.
+- **Job Management**: Asynchronous training orchestration with live progress and loss reporting via `GET /api/models/train/{job_id}`.
+
+### 3. Instance Segmentation & Confidence Calibration (Modules C & D)
+- **Segmentation Engine**: `ActiveContourSegmentationEngine` registered under `"segmentation"`, applying morphological snakes and active contour models to refine bounding boxes into accurate tree crown polygons.
+- **Topological Polygon Repair**: `validate_and_repair_crown_polygon` leveraging Shapely's `make_valid` to resolve self-intersecting rings, remove degenerate zero-area slivers, and preserve valid geometries.
+- **Confidence Calibration**:
+  - Expected Calibration Error (ECE) and Brier score.
+  - Temperature Scaling (`TemperatureScaler` fitting optimal $T > 0$ via Negative Log-Likelihood minimization).
+  - Explicit distinction between heuristic ranking and calibrated model probabilities.
+- **Image Quality Diagnostics & Uncertainty Flagging**:
+  - `ImageQualityDiagnostics`: Laplacian sharpness variance, RMS contrast, nodata fraction.
+  - `assess_detection_uncertainty`: Automatically flags blurry, low-contrast, boundary-proximal, or low-margin detections for human verification.
+
+### 4. Multispectral Vegetation Health Analysis (Module E)
+- **Scientific Honesty Guarantee**: Native 3-band RGB imagery is strictly differentiated from 4+ band imagery with calibrated Near-Infrared (NIR) or Red-Edge bands. If NDVI is requested on RGB imagery, the engine rejects the request with an informative error recommending RGB indices rather than synthesizing deceptive mock data.
+- **Supported Indices**:
+  - RGB Indices: VARI (Visible Atmospherically Resistant Index), GLI (Green Leaf Index), ExG (Excess Green).
+  - Multispectral Indices: NDVI (Normalized Difference Vegetation Index), GNDVI (Green NDVI), NDRE (Red Edge), SAVI (Soil Adjusted).
+- **Zonal Crown Statistics**: Extracts mean, median, min, max, and standard deviation per crown boundary polygon, classifying crowns into physiological vigor tiers (Vigorous, Moderate, Stressed, Senescent).
+- **Scene Statistics**: Complete scene-level distribution histogram, mean, median, min, max, and valid pixel counts.
+
+### 5. Multi-Temporal Canopy Change Detection (Module F)
+- **Bi-Temporal Matching**: Pairs crowns across survey epochs (T1 baseline vs T2 monitoring) using spatial IoU matching and configurable area disturbance thresholds.
+- **Canopy Dynamic Categories**:
+  - **Persistent Crowns**: Matched across epochs with consistent canopy area.
+  - **Lost Crowns**: Unmatched T1 crowns (evidence of logging, mortality, windthrow, or fire).
+  - **Recruited Crowns**: Unmatched T2 crowns (evidence of natural regeneration or reforestation).
+  - **Disturbed Crowns**: Matched crowns exhibiting area loss or abnormal expansion exceeding the threshold.
+- **Dynamic Summaries**: Canopy Gain ($m^2$), Canopy Loss ($m^2$), Net Canopy Change ($m^2$), and Canopy Persistence Rate (%).
+- **Export Formats**: Standardized Change GeoJSON with classification styling properties and CSV tabular reports.
+
+### 6. Frontend Integration & Multi-Module UI
+- **Multi-Module Navigation**: Seamless switching between "Survey & Detection", "Models & Benchmarks", "Vegetation Health", and "Temporal Change".
+- **`ModelEvaluationDashboard`**: Benchmark comparison table, mAP@50/75/50:95, count MAE, evaluation trigger, and fine-tuning job launcher with live progress bars.
+- **`VegetationPanel`**: Index selector, band requirement notices, scene distribution charts, and zonal crown health tables with CSV export.
+- **`TemporalChangePanel`**: Epoch configuration (with 1-click current survey detection ingestion), threshold sliders, dynamic cards, crown event table, and GeoJSON/CSV exports.
+- **`UncertaintyIndicator`**: Integrated calibration indicators and image quality diagnostics displayed in both `CrownInspector` and `ResultsPanel`.
 
 ## Not built yet
 

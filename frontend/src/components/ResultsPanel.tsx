@@ -11,6 +11,7 @@ import type { AnalysisResult, BoundaryPreview, Capabilities, ConfidenceBin } fro
 import { ConfidenceChart } from "./ConfidenceChart";
 import { CrownInspector } from "./CrownInspector";
 import { Limitations } from "./Limitations";
+import { UncertaintyIndicator } from "./UncertaintyIndicator";
 
 interface Props {
   capabilities: Capabilities | null;
@@ -134,6 +135,15 @@ export function ResultsPanel({
           mean={result.summary.mean_confidence}
           median={result.summary.median_confidence}
         />
+      )}
+
+      {result && result.quality_diagnostics && (
+        <section className="border-b border-line p-4 lg:p-5">
+          <UncertaintyIndicator
+            diagnostics={result.quality_diagnostics}
+            confidenceKind={result.summary.confidence_kind}
+          />
+        </section>
       )}
 
       {result && (

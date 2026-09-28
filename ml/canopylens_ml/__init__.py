@@ -18,19 +18,51 @@ from .geometry import (
 )
 from .types import CrownDetection, DetectionParams
 from .vegetation import excess_green, vegetation_mask
+from .multispectral import (
+    BandMapping,
+    VegetationAnalysisResult,
+    ZonalCrownStats,
+    analyze_vegetation,
+    compute_vegetation_index,
+    compute_zonal_crown_statistics,
+)
+from .model_registry import ModelEntry, ModelRegistry, get_model_registry
+from .temporal import (
+    ChangePolygon,
+    TemporalChangeResult,
+    TemporalCrownMatch,
+    detect_canopy_change,
+    export_change_csv,
+    export_change_geojson,
+)
 
 __all__ = [
+    "BandMapping",
+    "ChangePolygon",
     "CrownDetection",
     "DetectionEngine",
     "DetectionParams",
     "EngineAvailability",
     "EngineInfo",
     "EngineUnavailableError",
+    "ModelEntry",
+    "ModelRegistry",
+    "TemporalChangeResult",
+    "TemporalCrownMatch",
+    "VegetationAnalysisResult",
+    "ZonalCrownStats",
+    "analyze_vegetation",
     "available_engines",
     "bounding_box",
     "circularity",
+    "compute_vegetation_index",
+    "compute_zonal_crown_statistics",
+    "detect_canopy_change",
     "excess_green",
+    "export_change_csv",
+    "export_change_geojson",
     "get_engine",
+    "get_model_registry",
     "polygon_area",
     "polygon_centroid",
     "polygon_perimeter",

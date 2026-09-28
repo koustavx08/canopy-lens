@@ -24,11 +24,12 @@ if TYPE_CHECKING:  # imported for typing only; the runtime path stays lazy
 _LAZY_ENGINES: dict[str, str] = {
     "classical": "canopylens_ml.engines.classical:ClassicalEngine",
     "deepforest": "canopylens_ml.engines.deepforest_engine:DeepForestEngine",
+    "segmentation": "canopylens_ml.segmentation:ActiveContourSegmentationEngine",
 }
 
-# Best quality first. DeepForest is a model trained for this exact task; the
-# classical engine is the dependable fallback that runs without torch.
-PREFERENCE_ORDER: tuple[str, ...] = ("deepforest", "classical")
+# Best quality first. DeepForest is a model trained for this exact task;
+# segmentation provides true instance polygons; classical is the dependable fallback.
+PREFERENCE_ORDER: tuple[str, ...] = ("deepforest", "segmentation", "classical")
 
 
 def _install() -> None:

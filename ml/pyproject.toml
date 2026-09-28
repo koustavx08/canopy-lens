@@ -9,5 +9,6 @@ description = "Tree crown detection engines for CanopyLens"
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
-[tool.setuptools]
-packages = ["canopylens_ml", "canopylens_ml.engines"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["canopylens_ml*"]

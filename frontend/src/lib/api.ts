@@ -257,3 +257,107 @@ function filenameFrom(response: Response): string | null {
   const match = header?.match(/filename="?([^"\r\n;]+)"?/i);
   return match ? match[1] : null;
 }
+
+// ---------------------------------------------------------------------------
+// ML Intelligence Engine: Models, Benchmarks, Training, Vegetation, Change
+// ---------------------------------------------------------------------------
+
+import type {
+  BenchmarkResponse,
+  EvaluationResponse,
+  ModelMetadata,
+  TemporalChangeResponse,
+  TrainJobAccepted,
+  TrainJobStatus,
+  VegetationResponse,
+} from "../types";
+
+export function fetchModels(signal?: AbortSignal): Promise<ModelMetadata[]> {
+  return request<ModelMetadata[]>("/api/models", { signal });
+}
+
+export function fetchModelDetails(modelId: string, signal?: AbortSignal): Promise<ModelMetadata> {
+  return request<ModelMetadata>(`/api/models/${encodeURIComponent(modelId)}`, { signal });
+}
+
+export function fetchBenchmarks(signal?: AbortSignal): Promise<BenchmarkResponse> {
+  return request<BenchmarkResponse>("/api/models/benchmarks", { signal });
+}
+
+export function evaluateModel(
+  modelName: string,
+  datasetName: string,
+  signal?: AbortSignal,
+): Promise<EvaluationResponse> {
+  return request<EvaluationResponse>("/api/models/evaluate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_name: modelName, dataset_name: datasetName }),
+    signal,
+  });
+}
+
+export interface TrainingParams {
+  model_name: string;
+  base_model?: string;
+  epochs?: number;
+  batch_size?: number;
+  lr?: number;
+  dataset_path?: string;
+}
+
+export function startTraining(
+  params: TrainingParams,
+  signal?: AbortSignal,
+): Promise<TrainJobAccepted> {
+  return request<TrainJobAccepted>("/api/models/train", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+    signal,
+  });
+}
+
+export function fetchTrainJob(jobId: string, signal?: AbortSignal): Promise<TrainJobStatus> {
+  return request<TrainJobStatus>(`/api/models/train/${encodeURIComponent(jobId)}`, { signal });
+}
+
+export function analyzeVegetation(
+  image: File,
+  indexName: string = "VARI",
+  crownsJson?: string,
+  signal?: AbortSignal,
+): Promise<VegetationResponse> {
+  const body = new FormData();
+  body.append("image", image);
+  body.append("index_name", indexName);
+  if (crownsJson) {
+    body.append("crowns_json", crownsJson);
+  }
+  return request<VegetationResponse>("/api/vegetation", {
+    method: "POST",
+    body,
+    signal,
+  });
+}
+
+export function analyzeTemporalChange(
+  t1Detections: unknown[],
+  t2Detections: unknown[],
+  iouThreshold: number = 0.3,
+  areaDiffThreshold: number = 0.2,
+  signal?: AbortSignal,
+): Promise<TemporalChangeResponse> {
+  return request<TemporalChangeResponse>("/api/change", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      t1_detections: t1Detections,
+      t2_detections: t2Detections,
+      iou_threshold: iouThreshold,
+      area_diff_threshold: areaDiffThreshold,
+    }),
+    signal,
+  });
+}
+

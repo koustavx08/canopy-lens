@@ -143,6 +143,101 @@ describe("the endpoints", () => {
     const [, init] = vi.mocked(fetch).mock.calls[0];
     expect((init?.body as FormData).get("file")).toBeInstanceOf(File);
   });
+
+  it("fetches model registry catalog", async () => {
+    const api = await import("./api");
+    vi.mocked(fetch).mockResolvedValue(
+      respondWith([{ id: "deepforest_neon", name: "deepforest_neon", architecture: "retinanet" }]),
+    );
+
+    const models = await api.fetchModels();
+    expect(models).toHaveLength(1);
+    expect(models[0].id).toBe("deepforest_neon");
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe("/api/models");
+  });
+
+  it("fetches benchmark summary comparison", async () => {
+    const api = await import("./api");
+    vi.mocked(fetch).mockResolvedValue(
+      respondWith({
+        models: [],
+        comparison_table: [{ model_name: "m1", map50: 0.8 }],
+        markdown_table: "# Benchmarks",
+      }),
+    );
+
+    const benchmarks = await api.fetchBenchmarks();
+    expect(benchmarks.comparison_table).toHaveLength(1);
+    expect(benchmarks.comparison_table[0].map50).toBe(0.8);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe("/api/models/benchmarks");
+  });
+
+  it("posts evaluation request for a specific model and dataset", async () => {
+    const api = await import("./api");
+    vi.mocked(fetch).mockResolvedValue(
+      respondWith({
+        model_name: "deepforest_neon",
+        dataset_name: "neon_eval",
+        summary: {},
+        metrics_at_50: { average_precision: 0.75 },
+        segmentation: {},
+        forest_types: {},
+        threshold_map: {},
+      }),
+    );
+
+    const res = await api.evaluateModel("deepforest_neon", "neon_eval");
+    expect(res.model_name).toBe("deepforest_neon");
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/models/evaluate");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      model_name: "deepforest_neon",
+      dataset_name: "neon_eval",
+    });
+  });
+
+  it("posts training request with hyperparameters", async () => {
+    const api = await import("./api");
+    vi.mocked(fetch).mockResolvedValue(
+      respondWith({
+        job_id: "train-123",
+        model_name: "finetuned_v1",
+        status: "queued",
+        status_url: "/api/models/train/train-123",
+      }),
+    );
+
+    const res = await api.startTraining({
+      model_name: "finetuned_v1",
+      epochs: 10,
+      batch_size: 4,
+    });
+    expect(res.job_id).toBe("train-123");
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/models/train");
+    expect(JSON.parse(init?.body as string).model_name).toBe("finetuned_v1");
+  });
+
+  it("posts temporal change analysis request", async () => {
+    const api = await import("./api");
+    vi.mocked(fetch).mockResolvedValue(
+      respondWith({
+        summary: { persistent_crowns: 10, lost_crowns: 2, recruited_crowns: 1 },
+        crown_changes: [],
+        total_change_polygons: 13,
+        change_geojson: { type: "FeatureCollection", features: [] },
+        warnings: [],
+        notice: "Canopy change analysis computed.",
+      }),
+    );
+
+    const res = await api.analyzeTemporalChange([{ id: "t1" }], [{ id: "t2" }], 0.4, 0.25);
+    expect(res.summary.persistent_crowns).toBe(10);
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/change");
+    expect(JSON.parse(init?.body as string).iou_threshold).toBe(0.4);
+  });
 });
 
 describe("apiUrl", () => {

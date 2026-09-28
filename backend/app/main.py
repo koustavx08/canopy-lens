@@ -17,7 +17,7 @@ from .config import Settings, get_settings
 from .errors import register_error_handlers
 from .logging_config import configure_logging
 from .observability import ObservabilityMiddleware
-from .routers import analysis, boundary, health
+from .routers import analysis, boundary, health, ml_intelligence
 from .schemas import HealthResponse
 from .security import RateLimitMiddleware, require_api_key
 from .services.jobs import get_job_store
@@ -97,6 +97,7 @@ def create_app() -> FastAPI:
     guarded = [Depends(require_api_key)]
     app.include_router(boundary.router, prefix="/api", dependencies=guarded)
     app.include_router(analysis.router, prefix="/api", dependencies=guarded)
+    app.include_router(ml_intelligence.router, prefix="/api", dependencies=guarded)
 
     # Container orchestrators and uptime checks look for /health at the root,
     # and it costs one route to be found there as well as under /api.

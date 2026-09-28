@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Header } from "./components/Header";
 import { MapView } from "./components/MapView";
+import { ModelEvaluationDashboard } from "./components/ModelEvaluationDashboard";
 import { ResultsPanel } from "./components/ResultsPanel";
 import { Sidebar } from "./components/Sidebar";
+import { TemporalChangePanel } from "./components/TemporalChangePanel";
+import { VegetationPanel } from "./components/VegetationPanel";
 import { ApiError, fetchCapabilities, previewBoundary } from "./lib/api";
 import { useAnalysis } from "./lib/useAnalysis";
 import type {
@@ -10,11 +13,13 @@ import type {
   Capabilities,
   DetectionSettings,
   SelectedFile,
+  ViewTab,
 } from "./types";
 
 const PREVIEWABLE = /\.(png|jpe?g|webp|gif)$/i;
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<ViewTab>("survey");
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [image, setImage] = useState<SelectedFile | null>(null);
@@ -115,9 +120,6 @@ export default function App() {
         if (controller.signal.aborted) return;
         setBoundaryPreview(null);
         setBoundaryLoading(false);
-        // The server's own explanation names what is wrong with the file; a
-        // generic "could not read boundary" would tell the user nothing they
-        // could act on.
         setBoundaryError(
           error instanceof ApiError ? error.message : "The boundary file could not be read.",
         );
@@ -175,50 +177,80 @@ export default function App() {
         Skip to results
       </a>
 
-      <Header capabilities={capabilities} error={apiError} />
+      <Header
+        capabilities={capabilities}
+        error={apiError}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+      />
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <Sidebar
-          capabilities={capabilities}
-          imageFile={image?.file ?? null}
-          boundaryFile={boundary}
-          boundaryPreview={boundaryPreview}
-          boundaryError={boundaryError}
-          boundaryLoading={boundaryLoading}
-          settings={settings}
-          onImageSelect={handleImageSelect}
-          onBoundarySelect={setBoundary}
-          onSettingsChange={setSettings}
-          onRun={handleRun}
-          onCancel={handleCancel}
-          runBlockedReason={runBlockedReason}
-          phase={analysis.phase}
-          job={analysis.job}
-          uploadFraction={analysis.uploadFraction}
-          error={analysis.error}
-        />
-
-        <main className="flex min-h-0 min-w-0 flex-1">
-          <MapView
-            image={image}
-            boundary={boundaryPreview}
+      {activeTab === "survey" && (
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          <Sidebar
+            capabilities={capabilities}
+            imageFile={image?.file ?? null}
+            boundaryFile={boundary}
+            boundaryPreview={boundaryPreview}
             boundaryError={boundaryError}
             boundaryLoading={boundaryLoading}
+            settings={settings}
+            onImageSelect={handleImageSelect}
+            onBoundarySelect={setBoundary}
+            onSettingsChange={setSettings}
+            onRun={handleRun}
+            onCancel={handleCancel}
+            runBlockedReason={runBlockedReason}
+            phase={analysis.phase}
+            job={analysis.job}
+            uploadFraction={analysis.uploadFraction}
+            error={analysis.error}
+          />
+
+          <main className="flex min-h-0 min-w-0 flex-1">
+            <MapView
+              image={image}
+              boundary={boundaryPreview}
+              boundaryError={boundaryError}
+              boundaryLoading={boundaryLoading}
+              result={analysis.result}
+              selectedId={selectedCrown}
+              onSelect={setSelectedCrown}
+            />
+          </main>
+
+          <ResultsPanel
+            capabilities={capabilities}
+            apiError={apiError}
+            boundary={boundaryPreview}
             result={analysis.result}
             selectedId={selectedCrown}
             onSelect={setSelectedCrown}
           />
-        </main>
+        </div>
+      )}
 
-        <ResultsPanel
-          capabilities={capabilities}
-          apiError={apiError}
-          boundary={boundaryPreview}
-          result={analysis.result}
-          selectedId={selectedCrown}
-          onSelect={setSelectedCrown}
-        />
-      </div>
+      {activeTab === "benchmarks" && (
+        <main className="min-h-0 flex-1">
+          <ModelEvaluationDashboard />
+        </main>
+      )}
+
+      {activeTab === "vegetation" && (
+        <main className="min-h-0 flex-1">
+          <VegetationPanel
+            currentImage={image}
+            currentDetections={analysis.result?.detections ?? []}
+          />
+        </main>
+      )}
+
+      {activeTab === "temporal" && (
+        <main className="min-h-0 flex-1">
+          <TemporalChangePanel
+            currentDetections={analysis.result?.detections ?? []}
+          />
+        </main>
+      )}
     </div>
   );
 }

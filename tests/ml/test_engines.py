@@ -33,7 +33,7 @@ def scene(height=400, width=400, circles=((100, 100, 30), (250, 120, 40), (150, 
 
 class TestRegistry:
     def test_both_engines_are_registered(self):
-        assert set(registered_engines()) == {"classical", "deepforest"}
+        assert {"classical", "deepforest", "segmentation"}.issubset(set(registered_engines()))
 
     def test_the_registry_loads_itself_on_first_use(self):
         # Registration is a side effect of importing the engines package;

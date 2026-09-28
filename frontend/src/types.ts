@@ -198,6 +198,14 @@ export interface AnalysisSummary {
   boundary_applied: boolean;
 }
 
+export interface QualityDiagnostics {
+  sharpness_variance?: number;
+  rms_contrast?: number;
+  nodata_fraction?: number;
+  is_blurry?: boolean;
+  is_low_contrast?: boolean;
+}
+
 /** One detected crown. */
 export interface Detection {
   id: string;
@@ -214,6 +222,10 @@ export interface Detection {
   geometry: Geometry | null;
   /** Image pixel coordinates. Always present, so crowns can always be drawn. */
   geometry_px: Geometry;
+  /** Calibration and uncertainty diagnostics. */
+  calibrated_confidence?: number | null;
+  uncertainty_flags?: string[];
+  segmentation_polygon?: Geometry | null;
 }
 
 export interface AnalysisResult {
@@ -233,6 +245,8 @@ export interface AnalysisResult {
   /** The standing limits of the method, identical on every result. */
   limitations: { notice: string; items: string[] };
   downloads: { csv: string; geojson: string };
+  /** Image diagnostics and calibration assessment. */
+  quality_diagnostics?: QualityDiagnostics | null;
 }
 
 /**
@@ -248,3 +262,169 @@ export type AnalysisPhase =
   | "post-processing"
   | "complete"
   | "error";
+
+// ---------------------------------------------------------------------------
+// ML Intelligence Engine: Registry, Evaluation, Training, Vegetation, Change
+// ---------------------------------------------------------------------------
+
+export interface ModelMetadata {
+  id: string;
+  name: string;
+  architecture: string;
+  version: string;
+  description: string;
+  created_at: string;
+  checkpoint_path: string | null;
+  dataset_name: string | null;
+  image_resolution_m: number | null;
+  training_config: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  status: string;
+  is_default: boolean;
+  is_fallback: boolean;
+}
+
+export interface BenchmarkSummaryItem {
+  model_name: string;
+  dataset_name: string;
+  map50: number;
+  map50_95: number;
+  precision_50: number;
+  recall_50: number;
+  f1_50: number;
+  count_mae: number;
+  count_rmse: number;
+  area_ratio: number;
+}
+
+export interface BenchmarkResponse {
+  models: ModelMetadata[];
+  comparison_table: BenchmarkSummaryItem[];
+  markdown_table: string;
+}
+
+export interface EvaluationResponse {
+  model_name: string;
+  dataset_name: string;
+  summary: {
+    dataset_name: string;
+    image_count: number;
+    total_ground_truth_crowns: number;
+    total_predicted_crowns: number;
+    [key: string]: unknown;
+  };
+  metrics_at_50: {
+    iou_threshold: number;
+    true_positives: number;
+    false_positives: number;
+    false_negatives: number;
+    precision: number;
+    recall: number;
+    f1_score: number;
+    average_precision: number;
+    count_mae: number;
+    count_rmse: number;
+    mean_crown_area_mae_m2?: number | null;
+    [key: string]: unknown;
+  };
+  segmentation: Record<string, unknown>;
+  forest_types: Record<string, {
+    ground_truth_count: number;
+    predicted_count: number;
+    precision: number;
+    recall: number;
+    f1: number;
+    count_error: number;
+  }>;
+  threshold_map: Record<string, number>;
+}
+
+export interface TrainJobAccepted {
+  job_id: string;
+  model_name: string;
+  status: string;
+  status_url: string;
+}
+
+export interface TrainJobStatus {
+  job_id: string;
+  model_name: string;
+  status: "queued" | "running" | "completed" | "failed";
+  epoch: number;
+  total_epochs: number;
+  loss: number;
+  progress: number;
+  metrics: Record<string, unknown>;
+  error: ApiErrorBody | null;
+  checkpoint_path: string | null;
+}
+
+export interface VegetationCrownStat {
+  crown_id: string;
+  mean: number | null;
+  median: number | null;
+  min: number | null;
+  max: number | null;
+  std: number | null;
+  status?: "vigorous" | "moderate" | "stressed" | "senescent" | string;
+}
+
+export interface VegetationDistributionBin {
+  bin_start: number;
+  bin_end: number;
+  count: number;
+}
+
+export interface VegetationResponse {
+  index_name: string;
+  band_count: number;
+  scene_statistics: {
+    valid_pixels: number;
+    mean: number;
+    median: number;
+    min: number;
+    max: number;
+    std: number;
+  };
+  crown_count: number;
+  crown_statistics: VegetationCrownStat[];
+  distribution: VegetationDistributionBin[];
+  notice: string;
+}
+
+export interface CrownChange {
+  type: "lost" | "recruited" | "persistent" | "disturbed";
+  crown_t1_id: string | null;
+  crown_t2_id: string | null;
+  iou: number;
+  area_t1_m2: number | null;
+  area_t2_m2: number | null;
+  area_diff_m2: number | null;
+}
+
+export interface TemporalChangeSummary {
+  t1_crown_count: number;
+  t2_crown_count: number;
+  persistent_crowns: number;
+  lost_crowns: number;
+  recruited_crowns: number;
+  disturbed_crowns: number;
+  canopy_gain_m2: number;
+  canopy_loss_m2: number;
+  net_canopy_change_m2: number;
+  canopy_persistence_rate: number;
+  temporal_iou_threshold: number;
+  area_change_threshold: number;
+}
+
+export interface TemporalChangeResponse {
+  summary: TemporalChangeSummary;
+  crown_changes: CrownChange[];
+  total_change_polygons: number;
+  change_geojson: Record<string, unknown>;
+  warnings: string[];
+  notice: string;
+}
+
+export type ViewTab = "survey" | "benchmarks" | "vegetation" | "temporal";
+

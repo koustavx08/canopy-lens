@@ -78,19 +78,17 @@ support reads as an em dash rather than a plausible zero.
 
 ## What it does
 
-- Detects individual tree crowns in imagery and counts them
-- Reports per-crown area, total canopy area, analysed area and canopy coverage %
-- Reports a confidence value per crown, labelled with what kind of score it is
-- Parses a KML, KMZ or GeoJSON boundary, draws it on the map, and reports the
-  area it encloses in square metres
-- Restricts the analysis to that boundary and excludes detections outside it
-- Exports results as CSV and GeoJSON
-- Says clearly when the imagery cannot support a physical-area estimate
-
-- Runs the whole of that as a background job with real, pollable progress
-- Serves every figure above over HTTP, with CSV and GeoJSON downloads
-- Draws the crowns over a map, labels them, and reports one in detail when it
-  is clicked
+- **Tree Crown Detection**: Classical watershed baseline, DeepForest RetinaNet, and active contour instance segmentation.
+- **Canopy Metrics**: Measures per-crown area, total canopy area (union), analysed area (nodata excluded), and canopy coverage %.
+- **ML Evaluation Benchmarks**: COCO mAP (mAP@50, mAP@75, mAP@50:95), Precision, Recall, F1, Count MAE/RMSE, Crown Area MAE, with spatial block partitioning to eliminate spatial autocorrelation data leakage.
+- **Model Registry & Fine-Tuning**: Versioned model catalog, hyperparameter tracking, and domain fine-tuning with early stopping.
+- **Instance Segmentation & Repair**: Morphological contour refinement and topological polygon repair (resolving self-intersections and slivers).
+- **Confidence Calibration & Diagnostics**: Temperature scaling calibration, Expected Calibration Error (ECE), image sharpness and RMS contrast diagnostics.
+- **Multispectral Vegetation Health**: Genuine multispectral indices (NDVI, GNDVI, NDRE, SAVI) and native RGB indices (VARI, GLI, ExG) with zonal crown health statistics.
+- **Multi-Temporal Change Detection**: Bi-temporal crown tracking across survey epochs (persistent, lost, recruited, disturbed crowns) with gain/loss area calculation.
+- **Boundary Restriction**: Parses and measures KML, KMZ, and GeoJSON boundaries server-side with topological repair.
+- **Multi-Module Web Interface**: Interactive mapping, model benchmarks dashboard, vegetation health panel, and temporal change detector.
+- **Export Capabilities**: CSV, GeoJSON, and change summary downloads.
 
 ---
 
@@ -102,6 +100,7 @@ support reads as an em dash rather than a plausible zero.
 | --- | --- | --- | --- |
 | `classical` | Excess Green vegetation index, then a distance-transform watershed to separate touching crowns | **Heuristic** plausibility score from greenness, circularity and solidity | Core requirements only |
 | `deepforest` | [DeepForest](https://deepforest.readthedocs.io/) - a RetinaNet pretrained on hand-annotated NEON airborne RGB imagery of North American forests | **Model** score from the trained detector | Optional `requirements-ml.txt` (~2.5 GB) |
+| `segmentation` | Active contour / morphological snake segmentation refining crown bounding boxes into topological boundary polygons | **Model / Calibrated** score with uncertainty diagnostics | Core requirements only |
 
 `engine="auto"` uses DeepForest when it is genuinely installed and working, and
 falls back to the classical engine otherwise. If neither can run, the pipeline
@@ -697,6 +696,14 @@ request and response shapes there are the ones the server actually enforces.
 | `GET /api/results/{job_id}/csv` | The crowns as CSV, as a browser download |
 | `GET /api/results/{job_id}/geojson` | The crowns as GeoJSON, as a browser download |
 | `POST /api/boundary/preview` | Parse a KML, KMZ or GeoJSON boundary and return it as WGS84 geometry plus its measured area |
+| `GET /api/models` | List all registered detection models and their metadata |
+| `GET /api/models/{model_id}` | Get detailed configuration and metrics for a specific model |
+| `GET /api/models/benchmarks` | Standardized benchmark comparison table across all models (mAP@50, mAP@50:95, count MAE, area ratio) |
+| `POST /api/models/evaluate` | Evaluate a model on a dataset with forest-type stratification |
+| `POST /api/models/train` | Launch domain fine-tuning job with early stopping |
+| `GET /api/models/train/{job_id}` | Track training job progress, epoch, and validation loss |
+| `POST /api/vegetation` | Multispectral (NDVI, GNDVI, NDRE, SAVI) or RGB (VARI, GLI, ExG) index computation with zonal crown statistics |
+| `POST /api/change` | Bi-temporal canopy change detection (persistent, lost, recruited, disturbed crowns) |
 | `GET /api/health/ready` | Readiness: whether this instance can actually do the work, and which check failed if not |
 | `GET /api/metrics` | Counters in the Prometheus text format. Requires the API key when one is configured |
 | `GET /docs` | Interactive OpenAPI documentation |

@@ -1,5 +1,6 @@
 import { formatArea } from "../lib/format";
 import type { Detection } from "../types";
+import { UncertaintyIndicator } from "./UncertaintyIndicator";
 
 interface Props {
   crowns: Detection[];
@@ -83,6 +84,13 @@ export function CrownInspector({ crowns, selectedId, onSelect }: Props) {
         />
         <Row term="Engine" value={crown.engine} />
       </dl>
+
+      <div className="mt-3">
+        <UncertaintyIndicator
+          selectedCrown={crown}
+          confidenceKind={crown.confidence_kind}
+        />
+      </div>
 
       <div className="mt-4 flex gap-2">
         <button
