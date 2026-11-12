@@ -181,6 +181,29 @@ overestimate is visible rather than hidden.
 
 ---
 
+## Screenshots — what it looks like in the browser
+
+No screenshots are committed to the repository (the UI renders from live data, so any static image would go stale). To add them:
+
+1. Run the app locally: `./scripts/dev.sh` (or `scripts\dev.ps1` on Windows)
+2. Upload a GeoTIFF and an optional KML boundary
+3. Capture these four views:
+   - **The empty state** — sidebar with upload zones, no analysis run yet
+   - **Boundary preview** — a KML/KMZ dropped and drawn on the map, with its measured area
+   - **Results in progress** — the job progress bar moving through `Uploading` → `Processing` → `Post-processing` → `Complete`
+   - **Results complete** — crown polygons drawn on the map with labels, the metrics panel showing tree count, canopy area, coverage %, and the confidence distribution; click a crown to inspect its ID, area, centroid and score
+
+Paste the images under `docs/screenshots/` and link them here:
+
+```markdown
+![Empty state](./docs/screenshots/empty-state.png)
+![Boundary preview](./docs/screenshots/boundary-preview.png)
+![Results in progress](./docs/screenshots/results-progress.png)
+![Results complete](./docs/screenshots/results-complete.png)
+```
+
+---
+
 ## The boundary workflow
 
 A forest boundary is optional. When one is supplied it does three jobs: it
@@ -451,6 +474,26 @@ before it finishes. Raise it with the plan.
 a redeploy, not just a restart. The two origins differ, which is exactly why the
 API's `CANOPYLENS_CORS_ORIGINS` has to name the Vercel domain: a deployment
 where `curl` works and the browser does not is almost always this.
+
+### Public deployment checklist
+
+Before you point a public URL at this API, complete these steps:
+
+1. **Set `CANOPYLENS_API_KEYS`** to a comma-separated list of keys. The frontend
+   sends one as `X-API-Key` via `VITE_API_KEY`. Without keys the API is open to
+   anyone who finds the URL, and the readiness probe reports it as degraded in
+   production.
+2. **Set `CANOPYLENS_CORS_ORIGINS`** to exactly the frontend's origin
+   (`https://<your-app>.vercel.app`), not `*`. A wrong value here is the usual
+   cause of `curl` working while the browser cannot reach the API.
+3. **Set `CANOPYLENS_TRUSTED_PROXY_HOPS=1`** behind Render, nginx, or any
+   reverse proxy so the rate limiter counts real callers instead of the proxy.
+4. **Choose an instance size.** The Render starter plan has 512 MB RAM and half
+   a vCPU — one analysis at a time, uploads capped at 128 MB. Raise limits with
+   the plan.
+5. **Keep one instance.** Jobs live in the instance's own SQLite file. A second
+   instance would not know about the first one's jobs. Scaling out needs a
+   shared database first.
 
 ### Closing the door
 
@@ -1028,36 +1071,37 @@ such rather than a square-metre value that looks authoritative and is not.
 
 ---
 
-## Roadmap
+## Roadmap — everything planned is done
 
-1. ~~**Detection engines**~~ - classical CV baseline and DeepForest, both
-   registered and reporting their availability honestly. **Done.**
-2. ~~**Raster pipeline**~~ - windowed reading, overlapping tiles, NMS
-   deduplication at tile boundaries. **Done.**
-3. ~~**Geospatial layer**~~ - CRS preservation, KML/KMZ parsing and
-   reprojection into the raster CRS, boundary clipping, area via a projected
-   CRS. **Done.**
-4. ~~**Export**~~ - `export_csv()` and `export_geojson()` generated from the
-   real analysis. **Done.**
-5. ~~**Boundary workflow**~~ - parsing, repair, multi-part and hole handling,
-   declared coordinate systems, boundary area in m2, `POST
-   /api/boundary/preview`, and the boundary drawn on the map as soon as it is
-   dropped. **Done.**
-6. ~~**Analysis endpoints**~~ - imagery upload with streamed size limits,
-   background jobs with tile-based progress, the full result payload, and CSV
-   and GeoJSON downloads, with the pipeline's typed errors mapped onto the
-   existing error codes. **Done.**
-7. ~~**Results and interaction**~~ - crown polygons on the map with their IDs,
-   click-to-inspect (Crown ID, confidence, area, centroid), the metrics panel,
-   the score distribution, staged progress, and both downloads. **Done.**
-8. ~~**Deployment**~~ - a Render blueprint for the API, a Vercel project for
-   the client, the Docker Compose stack for anywhere else, and CI running lint,
-   tests, the frontend build and both container builds on every push. **Done.**
+| # | Area | State |
+|---|------|-------|
+| 1 | Detection engines — classical CV baseline and DeepForest | ~~Done~~ |
+| 2 | Raster pipeline — windowed reading, overlapping tiles, NMS deduplication | ~~Done~~ |
+| 3 | Geospatial layer — CRS, KML/KMZ, reprojection, boundary clipping | ~~Done~~ |
+| 4 | Export — `export_csv()` and `export_geojson()` | ~~Done~~ |
+| 5 | Boundary workflow — parsing, repair, preview endpoint, map drawing | ~~Done~~ |
+| 6 | Analysis endpoints — upload, background jobs, progress, results, downloads | ~~Done~~ |
+| 7 | Results and interaction — crowns on map, click-to-inspect, metrics, downloads | ~~Done~~ |
+| 8 | Deployment — Docker Compose, Render blueprint, Vercel project, CI | ~~Done~~ |
 
-That is the whole of what was planned. What would come next is not more of the
-same: ground-truth validation against annotated imagery, a job store that
-survives a restart, and species or height estimation - each a different project
-with its own honesty problem to solve.
+That is the whole of what was planned. The project is **complete and deployable**:
+imagery goes in over HTTP, measured crowns come back in the browser, both exports
+download, and the whole of it builds, tests and deploys from the manifests in
+this repository.
+
+### What comes next (as separate projects)
+
+These are not more of the same — each is its own project with its own honesty
+problem to solve:
+
+- **Ground-truth validation** — score detections against hand-annotated crowns
+  with `app.validate`. No ground-truth dataset ships with this repository; the
+  dataset is yours to bring.
+- **Shared job store** — jobs currently live in one SQLite file per instance.
+  Surviving a restart already works; surviving a host change needs a shared
+  database so more than one instance can answer polls.
+- **Species or height estimation** — a different inference problem entirely,
+  beyond what crown detection alone can support.
 
 ---
 

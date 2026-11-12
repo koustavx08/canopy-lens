@@ -1,10 +1,28 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm --prefix frontend ci && npm --prefix frontend run build",
-  "outputDirectory": "frontend/dist",
-  "installCommand": "echo \"install happens in buildCommand, against frontend/\"",
-  "framework": null,
-  "rewrites": [{ "source": "/((?!assets/).*)", "destination": "/index.html" }],
+  "services": {
+    "backend": {
+      "root": "backend",
+      "framework": "fastapi",
+      "runtime": "python",
+      "entrypoint": "app.main:app"
+    },
+    "frontend": {
+      "root": "frontend",
+      "framework": "vite",
+      "buildCommand": "npm ci && npm run build",
+      "devCommand": "npm run dev",
+      "installCommand": "npm ci",
+      "outputDirectory": "dist",
+      "bindings": [
+        { "type": "service", "service": "backend", "format": "url", "env": "BACKEND_URL" }
+      ]
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": { "service": "backend" } },
+    { "source": "/(.*)", "destination": { "service": "frontend" } }
+  ],
   "headers": [
     {
       "source": "/assets/(.*)",
